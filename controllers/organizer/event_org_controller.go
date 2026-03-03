@@ -2,242 +2,446 @@ package organizer
 
 import (
 	"context"
+	"database/sql"
+	"encoding/json"
 	"net/http"
+	"strings"
+	"time"
 
 	"bilheteria-api/config"
+	"bilheteria-api/internal/dbutil"
+	"bilheteria-api/services/eventservice"
+	"bilheteria-api/services/orgservice"
+	"bilheteria-api/services/storage"
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 )
 
-// GET /org/:slug/events
-// Lista todos os eventos da org com stats básicas
-func GetOrgEventsHandler(c *gin.Context) {
-	slug := c.Param("slug")
+// SaveDraftHandler — POST /org/:slug/events
+// Salva o evento como rascunho. Apenas title é obrigatório.
+// Aceita dados parciais — sempre persiste com status 'draft'.
+func SaveDraftHandler(c *gin.Context) {
+	orgSlug := c.Param("slug")
 	userID, _ := c.Get("userID")
 	uid := userID.(string)
 
-	db := config.GetDB()
-	ctx := context.Background()
+	db  := config.GetDB()
+	ctx := c.Request.Context()
 
-	var orgID string
-	err := db.QueryRowContext(ctx,
-		`SELECT o.id FROM organizations o
-		   JOIN organization_members om ON om.organization_id = o.id
-		  WHERE o.slug = $1 AND om.user_id = $2`, slug, uid,
-	).Scan(&orgID)
+	orgID, err := orgservice.ResolveOrgWithPermission(ctx, db, orgSlug, uid)
 	if err != nil {
 		c.JSON(http.StatusForbidden, gin.H{"error": "acesso negado"})
 		return
 	}
 
-	// Filtros opcionais via query params
-	statusFilter := c.Query("status") // published | draft | cancelled | finished
-
-	query := `
-		SELECT e.id, e.title, e.slug, e.status, e.image_url,
-		       to_char(e.start_date, 'DD Mon, HH24:MI') AS start_date,
-		       e.location->>'venue'   AS venue,
-		       e.location->>'city'    AS city,
-		       COUNT(t.id)            AS tickets_sold,
-		       COALESCE(
-		         (SELECT SUM(tb2.quantity_total)
-		            FROM ticket_batches tb2
-		           WHERE tb2.event_id = e.id), 0
-		       )                      AS total_capacity
-		  FROM events e
-		  LEFT JOIN orders o  ON o.event_id = e.id AND o.status = 'paid'
-		  LEFT JOIN tickets t ON t.order_id = o.id
-		 WHERE e.organization_id = $1`
-
-	args := []interface{}{orgID}
-
-	if statusFilter != "" {
-		query += ` AND e.status = $2`
-		args = append(args, statusFilter)
-	}
-
-	query += ` GROUP BY e.id, e.title, e.slug, e.status, e.image_url, e.start_date, e.location
-	           ORDER BY e.start_date DESC`
-
-	rows, err := db.QueryContext(ctx, query, args...)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao buscar eventos"})
+	var body SaveDraftRequest
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	defer rows.Close()
-
-	type EventRow struct {
-		ID            string
-		Title         string
-		Slug          string
-		Status        string
-		ImageURL      *string
-		StartDate     *string
-		Venue         *string
-		City          *string
-		TicketsSold   int
-		TotalCapacity int
+	if strings.TrimSpace(body.Title) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "title é obrigatório para salvar rascunho"})
+		return
 	}
 
-	var events []gin.H
-	for rows.Next() {
-		var e EventRow
-		if err := rows.Scan(&e.ID, &e.Title, &e.Slug, &e.Status, &e.ImageURL,
-			&e.StartDate, &e.Venue, &e.City, &e.TicketsSold, &e.TotalCapacity); err != nil {
-			continue
+	eventSlug, err := eventservice.GenerateUniqueSlug(ctx, db, body.Title)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao gerar slug"})
+		return
+	}
+
+	startDate, endDate, err := parseDatePair(body.StartDate, body.EndDate)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	locationJSON, _     := json.Marshal(body.Location)
+	requirementsJSON, _ := json.Marshal(body.Requirements)
+
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao iniciar transação"})
+		return
+	}
+	defer tx.Rollback()
+
+	eventID := uuid.New().String()
+	_, err = tx.ExecContext(ctx,
+		`INSERT INTO events
+		   (id, organization_id, title, slug, description, category,
+		    instagram, status, start_date, end_date, location, requirements)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,'draft',$8,$9,$10,$11)`,
+		eventID, orgID,
+		body.Title, eventSlug,
+		dbutil.NullableText(body.Description),
+		dbutil.NullableText(body.Category),
+		dbutil.NullableText(body.Instagram),
+		startDate, endDate,
+		dbutil.NullableJSON(locationJSON),
+		dbutil.NullableJSON(requirementsJSON),
+	)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao salvar rascunho: " + err.Error()})
+		return
+	}
+
+	if len(body.Categories) > 0 {
+		if err := eventservice.InsertTicketCategories(ctx, tx, eventID, body.Categories); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao criar categorias: " + err.Error()})
+			return
 		}
-		events = append(events, gin.H{
-			"id":             e.ID,
-			"title":          e.Title,
-			"slug":           e.Slug,
-			"status":         e.Status,
-			"image_url":      e.ImageURL,
-			"start_date":     e.StartDate,
-			"venue":          e.Venue,
-			"city":           e.City,
-			"tickets_sold":   e.TicketsSold,
-			"total_capacity": e.TotalCapacity,
-		})
 	}
 
-	if events == nil {
-		events = []gin.H{}
+	if err := tx.Commit(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao confirmar transação"})
+		return
 	}
 
-	c.JSON(http.StatusOK, events)
+	c.JSON(http.StatusCreated, gin.H{
+		"event_id": eventID,
+		"slug":     eventSlug,
+		"status":   "draft",
+		"message":  "rascunho salvo",
+	})
 }
 
-// GET /org/:slug/events/:eventID
-// Retorna detalhes completos de um evento específico
-func GetOrgEventDetailHandler(c *gin.Context) {
-	slug := c.Param("slug")
+// UpdateEventHandler — PATCH /org/:slug/events/:eventID
+// Atualiza qualquer campo com COALESCE. Se ticket_categories vier preenchido,
+// apaga e recria todas as categorias e lotes (CASCADE elimina os lotes filhos).
+func UpdateEventHandler(c *gin.Context) {
+	orgSlug := c.Param("slug")
 	eventID := c.Param("eventID")
 	userID, _ := c.Get("userID")
 	uid := userID.(string)
 
-	db := config.GetDB()
-	ctx := context.Background()
+	db  := config.GetDB()
+	ctx := c.Request.Context()
 
-	var orgID string
-	err := db.QueryRowContext(ctx,
-		`SELECT o.id FROM organizations o
-		   JOIN organization_members om ON om.organization_id = o.id
-		  WHERE o.slug = $1 AND om.user_id = $2`, slug, uid,
-	).Scan(&orgID)
-	if err != nil {
+	if _, err := orgservice.ResolveOrgWithPermission(ctx, db, orgSlug, uid); err != nil {
 		c.JSON(http.StatusForbidden, gin.H{"error": "acesso negado"})
 		return
 	}
 
-	// ── Dados do evento ───────────────────────────────────────────────────────
-	type EventDetail struct {
-		ID          string
-		Title       string
-		Slug        string
-		Description *string
-		Status      string
-		ImageURL    *string
-		LogoURL     *string
-		StartDate   *string
-		EndDate     *string
-		Location    *string
-		FormFields  *string
-		Views       int
-		CreatedAt   string
+	var body UpdateEventRequest
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
 	}
 
-	var e EventDetail
-	err = db.QueryRowContext(ctx,
-		`SELECT id, title, slug, description, status, image_url, logo_url,
-		        to_char(start_date, 'YYYY-MM-DD"T"HH24:MI:SS') AS start_date,
-		        to_char(end_date,   'YYYY-MM-DD"T"HH24:MI:SS') AS end_date,
-		        location::text, form_fields::text, views,
-		        to_char(created_at, 'YYYY-MM-DD') AS created_at
-		   FROM events
-		  WHERE id = $1 AND organization_id = $2`, eventID, orgID,
-	).Scan(&e.ID, &e.Title, &e.Slug, &e.Description, &e.Status,
-		&e.ImageURL, &e.LogoURL, &e.StartDate, &e.EndDate,
-		&e.Location, &e.FormFields, &e.Views, &e.CreatedAt)
+	startDate, endDate, err := parseDatePairPtr(body.StartDate, body.EndDate)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	locationJSON, _     := json.Marshal(body.Location)
+	requirementsJSON, _ := json.Marshal(body.Requirements)
+
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao iniciar transação"})
+		return
+	}
+	defer tx.Rollback()
+
+	_, err = tx.ExecContext(ctx,
+		`UPDATE events
+		    SET title        = COALESCE($1, title),
+		        description  = COALESCE($2, description),
+		        category     = COALESCE($3, category),
+		        instagram    = COALESCE($4, instagram),
+		        start_date   = COALESCE($5, start_date),
+		        end_date     = COALESCE($6, end_date),
+		        location     = COALESCE($7, location),
+		        requirements = COALESCE($8, requirements),
+		        updated_at   = now()
+		  WHERE id = $9`,
+		body.Title, body.Description, body.Category, body.Instagram,
+		startDate, endDate,
+		dbutil.NullableJSON(locationJSON),
+		dbutil.NullableJSON(requirementsJSON),
+		eventID,
+	)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao atualizar evento: " + err.Error()})
+		return
+	}
+
+	if len(body.Categories) > 0 {
+		if _, err := tx.ExecContext(ctx,
+			`DELETE FROM ticket_categories WHERE event_id = $1`, eventID,
+		); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao remover categorias antigas"})
+			return
+		}
+		if err := eventservice.InsertTicketCategories(ctx, tx, eventID, body.Categories); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao recriar categorias: " + err.Error()})
+			return
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao confirmar transação"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "evento atualizado"})
+}
+
+// PublishEventHandler — PATCH /org/:slug/events/:eventID/publish
+// Valida todas as pré-condições e muda o status para 'published'.
+// Retorna a lista completa de campos faltantes de uma só vez.
+func PublishEventHandler(c *gin.Context) {
+	orgSlug := c.Param("slug")
+	eventID := c.Param("eventID")
+	userID, _ := c.Get("userID")
+	uid := userID.(string)
+
+	db  := config.GetDB()
+	ctx := c.Request.Context()
+
+	if _, err := orgservice.ResolveOrgWithPermission(ctx, db, orgSlug, uid); err != nil {
+		c.JSON(http.StatusForbidden, gin.H{"error": "acesso negado"})
+		return
+	}
+
+	snap, err := fetchEventSnapshot(ctx, db, eventID)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "evento não encontrado"})
 		return
 	}
 
-	// ── Lotes do evento ───────────────────────────────────────────────────────
-	batchRows, err := db.QueryContext(ctx,
-		`SELECT id, name, type, price, quantity_total, quantity_sold,
-		        status, fee_payer, availability, min_purchase, max_purchase,
-		        to_char(start_date, 'YYYY-MM-DD"T"HH24:MI:SS') AS start_date,
-		        to_char(end_date,   'YYYY-MM-DD"T"HH24:MI:SS') AS end_date
-		   FROM ticket_batches
-		  WHERE event_id = $1
-		  ORDER BY created_at ASC`, eventID,
-	)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao buscar lotes"})
+	switch snap.Status {
+	case "published":
+		c.JSON(http.StatusConflict, gin.H{"error": "evento já está publicado"})
+		return
+	case "cancelled":
+		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "não é possível publicar um evento cancelado"})
 		return
 	}
-	defer batchRows.Close()
 
-	type BatchRow struct {
-		ID            string
-		Name          string
-		Type          string
-		Price         float64
-		QuantityTotal int
-		QuantitySold  int
-		Status        string
-		FeePayer      string
-		Availability  string
-		MinPurchase   int
-		MaxPurchase   int
-		StartDate     *string
-		EndDate       *string
-	}
-
-	var batches []gin.H
-	for batchRows.Next() {
-		var b BatchRow
-		if err := batchRows.Scan(&b.ID, &b.Name, &b.Type, &b.Price,
-			&b.QuantityTotal, &b.QuantitySold, &b.Status, &b.FeePayer,
-			&b.Availability, &b.MinPurchase, &b.MaxPurchase,
-			&b.StartDate, &b.EndDate); err != nil {
-			continue
-		}
-		batches = append(batches, gin.H{
-			"id":             b.ID,
-			"name":           b.Name,
-			"type":           b.Type,
-			"price":          b.Price,
-			"quantity_total": b.QuantityTotal,
-			"quantity_sold":  b.QuantitySold,
-			"status":         b.Status,
-			"fee_payer":      b.FeePayer,
-			"availability":   b.Availability,
-			"min_purchase":   b.MinPurchase,
-			"max_purchase":   b.MaxPurchase,
-			"start_date":     b.StartDate,
-			"end_date":       b.EndDate,
+	if errs := validateForPublish(snap); len(errs) > 0 {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{
+			"error":  "o evento não pode ser publicado",
+			"fields": errs,
 		})
+		return
 	}
 
-	if batches == nil {
-		batches = []gin.H{}
+	if _, err := db.ExecContext(ctx,
+		`UPDATE events SET status = 'published', updated_at = now() WHERE id = $1`, eventID,
+	); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao publicar evento"})
+		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"id":          e.ID,
-		"title":       e.Title,
-		"slug":        e.Slug,
-		"description": e.Description,
-		"status":      e.Status,
-		"image_url":   e.ImageURL,
-		"logo_url":    e.LogoURL,
-		"start_date":  e.StartDate,
-		"end_date":    e.EndDate,
-		"location":    e.Location,
-		"form_fields": e.FormFields,
-		"views":       e.Views,
-		"created_at":  e.CreatedAt,
-		"batches":     batches,
-	})
+	c.JSON(http.StatusOK, gin.H{"message": "evento publicado com sucesso"})
+}
+
+// CancelEventHandler — PATCH /org/:slug/events/:eventID/cancel
+// Cancela o evento. Ingressos vendidos exigem role owner.
+func CancelEventHandler(c *gin.Context) {
+	orgSlug := c.Param("slug")
+	eventID := c.Param("eventID")
+	userID, _ := c.Get("userID")
+	uid := userID.(string)
+
+	db  := config.GetDB()
+	ctx := c.Request.Context()
+
+	orgID, err := orgservice.ResolveOrgWithPermission(ctx, db, orgSlug, uid)
+	if err != nil {
+		c.JSON(http.StatusForbidden, gin.H{"error": "acesso negado"})
+		return
+	}
+
+	var status string
+	var ticketsSold int
+	err = db.QueryRowContext(ctx,
+		`SELECT e.status, COUNT(t.id)
+		   FROM events e
+		   LEFT JOIN orders o  ON o.event_id = e.id AND o.status = 'paid'
+		   LEFT JOIN tickets t ON t.order_id = o.id
+		  WHERE e.id = $1 AND e.organization_id = $2
+		  GROUP BY e.status`,
+		eventID, orgID,
+	).Scan(&status, &ticketsSold)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "evento não encontrado"})
+		return
+	}
+
+	switch status {
+	case "cancelled":
+		c.JSON(http.StatusConflict, gin.H{"error": "evento já está cancelado"})
+		return
+	case "finished":
+		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "não é possível cancelar um evento encerrado"})
+		return
+	}
+
+	if ticketsSold > 0 {
+		role, _ := orgservice.GetMemberRole(ctx, db, orgSlug, uid)
+		if role != "owner" {
+			c.JSON(http.StatusForbidden, gin.H{"error": "este evento tem ingressos vendidos. Apenas o owner pode cancelá-lo."})
+			return
+		}
+	}
+
+	if _, err := db.ExecContext(ctx,
+		`UPDATE events SET status = 'cancelled', updated_at = now() WHERE id = $1`, eventID,
+	); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao cancelar evento"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "evento cancelado", "tickets_sold": ticketsSold})
+}
+
+// UploadEventBannerHandler — POST /org/:slug/events/:eventID/banner
+func UploadEventBannerHandler(c *gin.Context) {
+	orgSlug := c.Param("slug")
+	eventID := c.Param("eventID")
+	userID, _ := c.Get("userID")
+	uid := userID.(string)
+
+	db  := config.GetDB()
+	ctx := c.Request.Context()
+
+	if _, err := orgservice.ResolveOrgWithPermission(ctx, db, orgSlug, uid); err != nil {
+		c.JSON(http.StatusForbidden, gin.H{"error": "acesso negado"})
+		return
+	}
+
+	file, header, err := c.Request.FormFile("file")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "arquivo não encontrado no campo 'file'"})
+		return
+	}
+	defer file.Close()
+
+	result, err := storage.UploadOrgImage(file, header, "event-banners")
+	if err != nil {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": err.Error()})
+		return
+	}
+
+	if _, err := db.ExecContext(ctx,
+		`UPDATE events SET image_url = $1, updated_at = now() WHERE id = $2`,
+		result.URL, eventID,
+	); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao salvar banner"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"url": result.URL})
+}
+
+// ─── Helpers privados ────────────────────────────────────────────────────────
+
+type eventSnapshot struct {
+	Status       string
+	Title        *string
+	Category     *string
+	ImageURL     *string
+	StartDate    *time.Time
+	EndDate      *time.Time
+	LocationCity *string
+	Requirements []byte
+	BatchCount   int
+}
+
+func fetchEventSnapshot(ctx context.Context, db *sql.DB, eventID string) (*eventSnapshot, error) {
+	var snap eventSnapshot
+	err := db.QueryRowContext(ctx,
+		`SELECT
+		   e.status, e.title, e.category, e.image_url,
+		   e.start_date, e.end_date,
+		   e.location->>'city' AS location_city,
+		   e.requirements,
+		   COUNT(tb.id) AS batch_count
+		  FROM events e
+		  LEFT JOIN ticket_categories tc ON tc.event_id = e.id
+		  LEFT JOIN ticket_batches tb    ON tb.category_id = tc.id AND tb.status = 'active'
+		 WHERE e.id = $1
+		 GROUP BY e.status, e.title, e.category, e.image_url,
+		          e.start_date, e.end_date, e.location, e.requirements`,
+		eventID,
+	).Scan(
+		&snap.Status, &snap.Title, &snap.Category,
+		&snap.ImageURL, &snap.StartDate, &snap.EndDate,
+		&snap.LocationCity, &snap.Requirements, &snap.BatchCount,
+	)
+	return &snap, err
+}
+
+func validateForPublish(snap *eventSnapshot) []string {
+	var errs []string
+
+	if snap.Title == nil || strings.TrimSpace(*snap.Title) == "" {
+		errs = append(errs, "título obrigatório")
+	}
+	if snap.Category == nil || *snap.Category == "" {
+		errs = append(errs, "categoria do evento obrigatória")
+	}
+	if snap.ImageURL == nil {
+		errs = append(errs, "banner do evento obrigatório")
+	}
+	if snap.StartDate == nil {
+		errs = append(errs, "data de início obrigatória")
+	}
+	if snap.EndDate == nil {
+		errs = append(errs, "data de término obrigatória")
+	}
+	if snap.StartDate != nil && snap.EndDate != nil && !snap.EndDate.After(*snap.StartDate) {
+		errs = append(errs, "data de término deve ser posterior ao início")
+	}
+	if snap.LocationCity == nil || *snap.LocationCity == "" {
+		errs = append(errs, "localização (cidade) obrigatória")
+	}
+	if snap.BatchCount == 0 {
+		errs = append(errs, "pelo menos um lote de ingressos ativo é obrigatório")
+	}
+
+	var req EventRequirementsInput
+	if snap.Requirements != nil {
+		if err := json.Unmarshal(snap.Requirements, &req); err == nil && !req.AcceptedTerms {
+			errs = append(errs, "termos de uso não aceitos")
+		}
+	} else {
+		errs = append(errs, "termos de uso não aceitos")
+	}
+
+	return errs
+}
+
+func parseDatePair(start, end string) (*time.Time, *time.Time, error) {
+	s, err := parseOptionalTime(start)
+	if err != nil {
+		return nil, nil, err
+	}
+	e, err := parseOptionalTime(end)
+	if err != nil {
+		return nil, nil, err
+	}
+	return s, e, nil
+}
+
+func parseDatePairPtr(start, end *string) (*time.Time, *time.Time, error) {
+	var s, e string
+	if start != nil { s = *start }
+	if end != nil   { e = *end   }
+	return parseDatePair(s, e)
+}
+
+func parseOptionalTime(s string) (*time.Time, error) {
+	if s == "" {
+		return nil, nil
+	}
+	t, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		return nil, err
+	}
+	return &t, nil
 }

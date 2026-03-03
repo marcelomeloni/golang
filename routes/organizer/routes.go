@@ -24,9 +24,14 @@ func Register(r *gin.Engine) {
 		auth.GET("/dashboard", controllers.DashboardHandler)
 
 		// Organização
-		auth.GET("/org/:slug",   controllers.GetOrgHandler)
-		auth.PATCH("/org/:slug", controllers.UpdateOrgHandler)
+		auth.GET("/org/:slug",    controllers.GetOrgHandler)
+		auth.PATCH("/org/:slug",  controllers.UpdateOrgHandler)
 		auth.DELETE("/org/:slug", controllers.DeleteOrgHandler)
+
+		// Upload de imagens da org
+		auth.POST("/org/:slug/logo",   controllers.UploadOrgLogoHandler)
+		auth.POST("/org/:slug/banner", controllers.UploadOrgBannerHandler)
+
 		// Equipe
 		auth.GET("/org/:slug/members",              controllers.GetMembersHandler)
 		auth.POST("/org/:slug/members",             controllers.AddMemberHandler)
@@ -41,8 +46,8 @@ func Register(r *gin.Engine) {
 
 		auth.GET("/org/:slug/overview", controllers.GetOrgOverviewHandler)
 
-// Eventos da org
-auth.GET("/org/:slug/events",           controllers.GetOrgEventsHandler)
-auth.GET("/org/:slug/events/:eventID",  controllers.GetOrgEventDetailHandler)
+		// Eventos da org
+		auth.GET("/org/:slug/events",          controllers.GetOrgEventsHandler)
+		auth.GET("/org/:slug/events/:eventID", controllers.GetOrgEventDetailHandler)
 	}
 }

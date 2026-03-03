@@ -43,7 +43,6 @@ func OnboardingHandler(c *gin.Context) {
 	}
 	defer tx.Rollback()
 
-	// 1. Atualiza full_name e cpf do usuário
 	_, err = tx.ExecContext(ctx,
 		`UPDATE users
 		    SET full_name  = $1,
@@ -57,7 +56,6 @@ func OnboardingHandler(c *gin.Context) {
 		return
 	}
 
-	// 2. Criar organização
 	orgID := uuid.New().String()
 	_, err = tx.ExecContext(ctx,
 		`INSERT INTO organizations (id, name, slug, description, email, phone, instagram)
@@ -70,7 +68,6 @@ func OnboardingHandler(c *gin.Context) {
 		return
 	}
 
-	// 3. Vincular como owner
 	_, err = tx.ExecContext(ctx,
 		`INSERT INTO organization_members (organization_id, user_id, role)
 		 VALUES ($1, $2, 'owner')`,
@@ -103,7 +100,6 @@ func GetOrgHandler(c *gin.Context) {
 	db := config.GetDB()
 	ctx := context.Background()
 
-	// Verifica se o usuário é membro
 	var orgID string
 	err := db.QueryRowContext(ctx,
 		`SELECT o.id FROM organizations o
@@ -126,6 +122,7 @@ func GetOrgHandler(c *gin.Context) {
 		Facebook              *string
 		Website               *string
 		LogoURL               *string
+		BannerURL             *string
 		PlatformFeePercentage float64
 		PlatformFeeFixed      float64
 		CreatedAt             string
@@ -134,23 +131,32 @@ func GetOrgHandler(c *gin.Context) {
 	var o OrgRow
 	err = db.QueryRowContext(ctx,
 		`SELECT id, name, slug, description, email, phone, instagram,
-		        facebook, website, logo_url,
+		        facebook, website, logo_url, banner_url,
 		        platform_fee_percentage, platform_fee_fixed,
 		        to_char(created_at, 'YYYY-MM-DD') AS created_at
 		   FROM organizations WHERE id = $1`, orgID,
-	).Scan(&o.ID, &o.Name, &o.Slug, &o.Description, &o.Email, &o.Phone,
-		&o.Instagram, &o.Facebook, &o.Website, &o.LogoURL,
-		&o.PlatformFeePercentage, &o.PlatformFeeFixed, &o.CreatedAt)
+	).Scan(
+		&o.ID, &o.Name, &o.Slug, &o.Description, &o.Email, &o.Phone,
+		&o.Instagram, &o.Facebook, &o.Website, &o.LogoURL, &o.BannerURL,
+		&o.PlatformFeePercentage, &o.PlatformFeeFixed, &o.CreatedAt,
+	)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao buscar organização"})
 		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"id": o.ID, "name": o.Name, "slug": o.Slug,
-		"description": o.Description, "email": o.Email, "phone": o.Phone,
-		"instagram": o.Instagram, "facebook": o.Facebook, "website": o.Website,
-		"logo_url": o.LogoURL,
+		"id":          o.ID,
+		"name":        o.Name,
+		"slug":        o.Slug,
+		"description": o.Description,
+		"email":       o.Email,
+		"phone":       o.Phone,
+		"instagram":   o.Instagram,
+		"facebook":    o.Facebook,
+		"website":     o.Website,
+		"logo_url":    o.LogoURL,
+		"banner_url":  o.BannerURL,
 		"platform_fee_percentage": o.PlatformFeePercentage,
 		"platform_fee_fixed":      o.PlatformFeeFixed,
 		"created_at":              o.CreatedAt,
@@ -158,7 +164,7 @@ func GetOrgHandler(c *gin.Context) {
 }
 
 // UpdateOrgHandler — PATCH /org/:slug
-// Atualiza dados da org. Apenas owner ou admin.
+// Atualiza dados textuais da org. Apenas owner ou admin.
 func UpdateOrgHandler(c *gin.Context) {
 	slug := c.Param("slug")
 	userID, _ := c.Get("userID")
@@ -167,7 +173,6 @@ func UpdateOrgHandler(c *gin.Context) {
 	db := config.GetDB()
 	ctx := context.Background()
 
-	// Verifica se é owner ou admin
 	var role string
 	err := db.QueryRowContext(ctx,
 		`SELECT om.role FROM organization_members om
@@ -201,7 +206,8 @@ func UpdateOrgHandler(c *gin.Context) {
 		        phone       = COALESCE($4, phone),
 		        instagram   = COALESCE($5, instagram),
 		        facebook    = COALESCE($6, facebook),
-		        website     = COALESCE($7, website)
+		        website     = COALESCE($7, website),
+		        updated_at  = now()
 		  WHERE slug = $8`,
 		body.Name, body.Description, body.Email, body.Phone,
 		body.Instagram, body.Facebook, body.Website, slug,
@@ -222,7 +228,6 @@ func DeleteOrgHandler(c *gin.Context) {
 	db := config.GetDB()
 	ctx := context.Background()
 
-	// Apenas owner pode excluir
 	var orgID, role string
 	err := db.QueryRowContext(ctx,
 		`SELECT o.id, om.role FROM organizations o
@@ -234,7 +239,6 @@ func DeleteOrgHandler(c *gin.Context) {
 		return
 	}
 
-	// Confirma o nome da org no body para evitar exclusão acidental
 	var body struct {
 		ConfirmName string `json:"confirm_name" binding:"required"`
 	}
