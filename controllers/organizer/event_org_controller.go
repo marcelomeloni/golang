@@ -11,6 +11,7 @@ import (
 	"bilheteria-api/config"
 	"bilheteria-api/internal/dbutil"
 	"bilheteria-api/services/eventservice"
+	"bilheteria-api/services/geocoding"
 	"bilheteria-api/services/orgservice"
 	"bilheteria-api/services/storage"
 	"github.com/gin-gonic/gin"
@@ -18,8 +19,6 @@ import (
 )
 
 // SaveDraftHandler — POST /org/:slug/events
-// Salva o evento como rascunho. Apenas title é obrigatório.
-// Aceita dados parciais — sempre persiste com status 'draft'.
 func SaveDraftHandler(c *gin.Context) {
 	orgSlug := c.Param("slug")
 	userID, _ := c.Get("userID")
@@ -56,8 +55,14 @@ func SaveDraftHandler(c *gin.Context) {
 		return
 	}
 
-	locationJSON, _     := json.Marshal(body.Location)
+	locationJSON, _ := json.Marshal(body.Location)
 	requirementsJSON, _ := json.Marshal(body.Requirements)
+
+	// Geocodifica a cidade em background — falha silenciosa se não encontrar
+	var coords *geocoding.Coordinates
+	if body.Location != nil {
+		coords, _ = geocoding.FromCityState(ctx, body.Location.City, body.Location.State)
+	}
 
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
@@ -70,8 +75,12 @@ func SaveDraftHandler(c *gin.Context) {
 	_, err = tx.ExecContext(ctx,
 		`INSERT INTO events
 		   (id, organization_id, title, slug, description, category,
-		    instagram, status, start_date, end_date, location, requirements)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,'draft',$8,$9,$10,$11)`,
+		    instagram, status, start_date, end_date, location, requirements, geolocation)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,'draft',$8,$9,$10,$11,
+		   CASE WHEN $12::float8 IS NOT NULL
+		        THEN ST_SetSRID(ST_MakePoint($13::float8, $12::float8), 4326)
+		        ELSE NULL END
+		 )`,
 		eventID, orgID,
 		body.Title, eventSlug,
 		dbutil.NullableText(body.Description),
@@ -80,6 +89,7 @@ func SaveDraftHandler(c *gin.Context) {
 		startDate, endDate,
 		dbutil.NullableJSON(locationJSON),
 		dbutil.NullableJSON(requirementsJSON),
+		coordLat(coords), coordLng(coords),
 	)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao salvar rascunho: " + err.Error()})
@@ -107,8 +117,6 @@ func SaveDraftHandler(c *gin.Context) {
 }
 
 // UpdateEventHandler — PATCH /org/:slug/events/:eventID
-// Atualiza qualquer campo com COALESCE. Se ticket_categories vier preenchido,
-// apaga e recria todas as categorias e lotes (CASCADE elimina os lotes filhos).
 func UpdateEventHandler(c *gin.Context) {
 	orgSlug := c.Param("slug")
 	eventID := c.Param("eventID")
@@ -138,6 +146,12 @@ func UpdateEventHandler(c *gin.Context) {
 	locationJSON, _     := json.Marshal(body.Location)
 	requirementsJSON, _ := json.Marshal(body.Requirements)
 
+	// Regeocodifica só se a localização foi enviada nesta requisição
+	var coords *geocoding.Coordinates
+	if body.Location != nil {
+		coords, _ = geocoding.FromCityState(ctx, body.Location.City, body.Location.State)
+	}
+
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao iniciar transação"})
@@ -155,12 +169,18 @@ func UpdateEventHandler(c *gin.Context) {
 		        end_date     = COALESCE($6, end_date),
 		        location     = COALESCE($7, location),
 		        requirements = COALESCE($8, requirements),
+		        geolocation  = CASE
+		                         WHEN $9::float8 IS NOT NULL
+		                         THEN ST_SetSRID(ST_MakePoint($10::float8, $9::float8), 4326)
+		                         ELSE geolocation
+		                       END,
 		        updated_at   = now()
-		  WHERE id = $9`,
+		  WHERE id = $11`,
 		body.Title, body.Description, body.Category, body.Instagram,
 		startDate, endDate,
 		dbutil.NullableJSON(locationJSON),
 		dbutil.NullableJSON(requirementsJSON),
+		coordLat(coords), coordLng(coords),
 		eventID,
 	)
 	if err != nil {
@@ -190,8 +210,6 @@ func UpdateEventHandler(c *gin.Context) {
 }
 
 // PublishEventHandler — PATCH /org/:slug/events/:eventID/publish
-// Valida todas as pré-condições e muda o status para 'published'.
-// Retorna a lista completa de campos faltantes de uma só vez.
 func PublishEventHandler(c *gin.Context) {
 	orgSlug := c.Param("slug")
 	eventID := c.Param("eventID")
@@ -240,7 +258,6 @@ func PublishEventHandler(c *gin.Context) {
 }
 
 // CancelEventHandler — PATCH /org/:slug/events/:eventID/cancel
-// Cancela o evento. Ingressos vendidos exigem role owner.
 func CancelEventHandler(c *gin.Context) {
 	orgSlug := c.Param("slug")
 	eventID := c.Param("eventID")
@@ -338,7 +355,7 @@ func UploadEventBannerHandler(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"url": result.URL})
 }
 
-// ─── Helpers privados ────────────────────────────────────────────────────────
+// ─── Helpers privados ─────────────────────────────────────────────────────────
 
 type eventSnapshot struct {
 	Status       string
@@ -431,7 +448,7 @@ func parseDatePair(start, end string) (*time.Time, *time.Time, error) {
 func parseDatePairPtr(start, end *string) (*time.Time, *time.Time, error) {
 	var s, e string
 	if start != nil { s = *start }
-	if end != nil   { e = *end   }
+	if end != nil   { e = *end }
 	return parseDatePair(s, e)
 }
 
@@ -444,4 +461,20 @@ func parseOptionalTime(s string) (*time.Time, error) {
 		return nil, err
 	}
 	return &t, nil
+}
+
+// coordLat e coordLng retornam nil quando não há coordenadas,
+// permitindo o CASE WHEN $n IS NOT NULL no SQL.
+func coordLat(c *geocoding.Coordinates) interface{} {
+	if c == nil {
+		return nil
+	}
+	return c.Lat
+}
+
+func coordLng(c *geocoding.Coordinates) interface{} {
+	if c == nil {
+		return nil
+	}
+	return c.Lng
 }

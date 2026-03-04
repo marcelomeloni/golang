@@ -1,5 +1,5 @@
 package organizer
-
+import "bilheteria-api/services/eventservice"
 // ─── Tipos de request dos handlers de evento ─────────────────────────────────
 
 type SaveDraftRequest struct {

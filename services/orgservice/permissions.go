@@ -27,6 +27,23 @@ func ResolveOrgWithPermission(ctx context.Context, db *sql.DB, slug, uid string)
 	return orgID, nil
 }
 
+// ResolveOrgWithAnyMember retorna o orgID se o usuário for membro com qualquer role.
+// Usar em rotas que qualquer membro pode acessar (ex: listar eventos).
+func ResolveOrgWithAnyMember(ctx context.Context, db *sql.DB, slug, uid string) (string, error) {
+	var orgID string
+	err := db.QueryRowContext(ctx,
+		`SELECT o.id
+		   FROM organizations o
+		   JOIN organization_members om ON om.organization_id = o.id
+		  WHERE o.slug = $1 AND om.user_id = $2`,
+		slug, uid,
+	).Scan(&orgID)
+	if err != nil {
+		return "", fmt.Errorf("organização não encontrada ou usuário não é membro")
+	}
+	return orgID, nil
+}
+
 // IsMember verifica se o usuário pertence à organização com qualquer role.
 func IsMember(ctx context.Context, db *sql.DB, slug, uid string) bool {
 	var exists bool

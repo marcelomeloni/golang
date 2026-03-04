@@ -3,12 +3,12 @@ package organizer
 import (
 	"context"
 	"net/http"
+	"regexp"
 
 	"bilheteria-api/config"
 	"github.com/gin-gonic/gin"
 )
 
-// GET /org/:slug/members
 func GetMembersHandler(c *gin.Context) {
 	slug := c.Param("slug")
 	userID, _ := c.Get("userID")
@@ -17,13 +17,13 @@ func GetMembersHandler(c *gin.Context) {
 	db := config.GetDB()
 	ctx := context.Background()
 
-	// Verifica se é membro da org
 	var orgID string
 	err := db.QueryRowContext(ctx,
 		`SELECT o.id FROM organizations o
 		   JOIN organization_members om ON om.organization_id = o.id
 		  WHERE o.slug = $1 AND om.user_id = $2`, slug, uid,
 	).Scan(&orgID)
+	
 	if err != nil {
 		c.JSON(http.StatusForbidden, gin.H{"error": "acesso negado"})
 		return
@@ -31,8 +31,8 @@ func GetMembersHandler(c *gin.Context) {
 
 	rows, err := db.QueryContext(ctx,
 		`SELECT om.id, om.user_id, om.role,
-		        to_char(om.created_at, 'YYYY-MM-DD') AS joined_at,
-		        u.full_name, u.email, u.cpf, u.avatar_url
+				to_char(om.created_at, 'YYYY-MM-DD') AS joined_at,
+				u.full_name, u.email, u.cpf, u.avatar_url
 		   FROM organization_members om
 		   JOIN users u ON u.id = om.user_id
 		  WHERE om.organization_id = $1
@@ -81,7 +81,6 @@ func GetMembersHandler(c *gin.Context) {
 	c.JSON(http.StatusOK, members)
 }
 
-// POST /org/:slug/members — adiciona membro por CPF
 func AddMemberHandler(c *gin.Context) {
 	slug := c.Param("slug")
 	userID, _ := c.Get("userID")
@@ -90,15 +89,15 @@ func AddMemberHandler(c *gin.Context) {
 	db := config.GetDB()
 	ctx := context.Background()
 
-	// Apenas owner ou admin podem adicionar
 	var orgID, role string
 	err := db.QueryRowContext(ctx,
 		`SELECT o.id, om.role FROM organizations o
 		   JOIN organization_members om ON om.organization_id = o.id
 		  WHERE o.slug = $1 AND om.user_id = $2`, slug, uid,
 	).Scan(&orgID, &role)
+	
 	if err != nil || (role != "owner" && role != "admin") {
-		c.JSON(http.StatusForbidden, gin.H{"error": "apenas owner ou admin podem adicionar membros"})
+		c.JSON(http.StatusForbidden, gin.H{"error": "permissão insuficiente"})
 		return
 	}
 
@@ -117,13 +116,18 @@ func AddMemberHandler(c *gin.Context) {
 		return
 	}
 
-	// Busca usuário pelo CPF
+	// Normaliza o CPF limpando pontuações da string recebida no JSON
+	re := regexp.MustCompile(`\D`)
+	cleanCPF := re.ReplaceAllString(body.CPF, "")
+
 	var targetUserID string
+	// Normaliza o dado da tabela users via regex_replace do Postgres no momento da consulta
 	err = db.QueryRowContext(ctx,
-		`SELECT id FROM users WHERE cpf = $1`, body.CPF,
+		`SELECT id FROM users WHERE regexp_replace(cpf, '\D', '', 'g') = $1`, cleanCPF,
 	).Scan(&targetUserID)
+	
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "usuário com esse CPF não encontrado"})
+		c.JSON(http.StatusNotFound, gin.H{"error": "usuário não encontrado"})
 		return
 	}
 
@@ -133,15 +137,15 @@ func AddMemberHandler(c *gin.Context) {
 		 ON CONFLICT (organization_id, user_id) DO UPDATE SET role = $3`,
 		orgID, targetUserID, body.Role,
 	)
+	
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao adicionar membro: " + err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "erro na inserção"})
 		return
 	}
 
 	c.JSON(http.StatusCreated, gin.H{"message": "membro adicionado"})
 }
 
-// PATCH /org/:slug/members/:memberID — atualiza role
 func UpdateMemberRoleHandler(c *gin.Context) {
 	slug := c.Param("slug")
 	memberID := c.Param("memberID")
@@ -157,8 +161,9 @@ func UpdateMemberRoleHandler(c *gin.Context) {
 		   JOIN organization_members om ON om.organization_id = o.id
 		  WHERE o.slug = $1 AND om.user_id = $2`, slug, uid,
 	).Scan(&orgID, &role)
+	
 	if err != nil || (role != "owner" && role != "admin") {
-		c.JSON(http.StatusForbidden, gin.H{"error": "apenas owner ou admin podem alterar roles"})
+		c.JSON(http.StatusForbidden, gin.H{"error": "permissão insuficiente"})
 		return
 	}
 
@@ -172,7 +177,7 @@ func UpdateMemberRoleHandler(c *gin.Context) {
 
 	validRoles := map[string]bool{"admin": true, "promoter": true, "checkin_staff": true}
 	if !validRoles[body.Role] {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "role inválida — owner não pode ser atribuído aqui"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "role inválida"})
 		return
 	}
 
@@ -181,15 +186,15 @@ func UpdateMemberRoleHandler(c *gin.Context) {
 		  WHERE id = $2 AND organization_id = $3`,
 		body.Role, memberID, orgID,
 	)
+	
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao atualizar role"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "erro na atualização"})
 		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "role atualizada"})
 }
 
-// DELETE /org/:slug/members/:memberID
 func RemoveMemberHandler(c *gin.Context) {
 	slug := c.Param("slug")
 	memberID := c.Param("memberID")
@@ -205,18 +210,19 @@ func RemoveMemberHandler(c *gin.Context) {
 		   JOIN organization_members om ON om.organization_id = o.id
 		  WHERE o.slug = $1 AND om.user_id = $2`, slug, uid,
 	).Scan(&orgID, &role)
+	
 	if err != nil || (role != "owner" && role != "admin") {
-		c.JSON(http.StatusForbidden, gin.H{"error": "apenas owner ou admin podem remover membros"})
+		c.JSON(http.StatusForbidden, gin.H{"error": "permissão insuficiente"})
 		return
 	}
 
-	// Impede remover o próprio owner
 	var targetRole string
 	_ = db.QueryRowContext(ctx,
 		`SELECT role FROM organization_members WHERE id = $1`, memberID,
 	).Scan(&targetRole)
+	
 	if targetRole == "owner" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "não é possível remover o owner"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "operação não permitida"})
 		return
 	}
 
@@ -224,8 +230,9 @@ func RemoveMemberHandler(c *gin.Context) {
 		`DELETE FROM organization_members WHERE id = $1 AND organization_id = $2`,
 		memberID, orgID,
 	)
+	
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao remover membro"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "erro na exclusão"})
 		return
 	}
 
