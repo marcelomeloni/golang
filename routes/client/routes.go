@@ -1,8 +1,8 @@
-// routes/client/routes.go
 package client
 
 import (
 	"bilheteria-api/controllers/client"
+	"bilheteria-api/middleware"
 	"github.com/gin-gonic/gin"
 )
 
@@ -14,9 +14,10 @@ func Register(r *gin.Engine) {
 		clientGroup.POST("/auth/complete-profile", client.CompleteProfile)
 
 		// Usuário
-		clientGroup.GET("/users/:userId",   client.GetUserProfile)
-		clientGroup.PATCH("/users/:userId", client.UpdateUserProfile)
+		clientGroup.GET("/users/:userId",         client.GetUserProfile)
+		clientGroup.PATCH("/users/:userId",       client.UpdateUserProfile)
 		clientGroup.POST("/users/:userId/avatar", client.UploadUserAvatar)
+
 		// Eventos
 		clientGroup.GET("/home-events",  client.GetHomeEvents)
 		clientGroup.GET("/events/:slug", client.GetEventDetail)
@@ -25,5 +26,17 @@ func Register(r *gin.Engine) {
 		clientGroup.GET("/organizers/:slug",           client.GetOrganizerDetail)
 		clientGroup.POST("/organizers/:slug/follow",   client.FollowOrganizer)
 		clientGroup.DELETE("/organizers/:slug/follow", client.UnfollowOrganizer)
+
+		// Checkout — sem auth (suporta guests)
+		clientGroup.POST("/checkout/coupon", middleware.OptionalAuth(), client.ValidateCoupon)
+clientGroup.POST("/checkout/orders", middleware.OptionalAuth(), client.CreateOrder)
+
+
+		// Rotas autenticadas — JWT obrigatório
+		authed := clientGroup.Group("/", middleware.AuthMiddleware())
+		{
+			authed.GET("/my-tickets",              client.GetMyTickets)
+			authed.GET("/my-tickets/:id/download", client.DownloadTicket)
+		}
 	}
 }

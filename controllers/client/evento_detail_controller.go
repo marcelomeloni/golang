@@ -28,6 +28,7 @@ type EventData struct {
 	Title        string        `json:"title"`
 	Description  string        `json:"description"`
 	ImageURL     string        `json:"image_url"`
+	Instagram    string        `json:"instagram"`
 	Date         string        `json:"date"`
 	LocationName string        `json:"locationName"`
 	Address      Address       `json:"address"`
@@ -62,18 +63,20 @@ type PlatformFee struct {
 }
 
 type OfficialLot struct {
-	ID       string  `json:"id"`
-	Title    string  `json:"title"`
-	Subtitle string  `json:"subtitle"`
-	Price    float64 `json:"price"`    // preço base sem taxa
-	FeePayer string  `json:"feePayer"` // "buyer" | "organizer"
+	ID                string  `json:"id"`
+	Title             string  `json:"title"`
+	Subtitle          string  `json:"subtitle"`
+	Price             float64 `json:"price"`
+	FeePayer          string  `json:"feePayer"`
+	Available         bool    `json:"available"`
+	UnavailableReason string  `json:"unavailableReason,omitempty"` // "sold_out" | "expired" | "not_started"
 }
 
 type MarketLot struct {
 	ID       string  `json:"id"`
 	Title    string  `json:"title"`
 	Subtitle string  `json:"subtitle"`
-	Price    float64 `json:"price"` // preço base sem taxa
+	Price    float64 `json:"price"`
 }
 
 // ==========================================
@@ -120,7 +123,7 @@ func GetEventDetail(c *gin.Context) {
 			UPDATE events
 			SET views = views + 1
 			WHERE slug = $1 AND status = 'published'
-			RETURNING id, title, description, image_url, start_date, location, requirements, organization_id
+			RETURNING id, title, description, image_url, start_date, location, requirements, organization_id, instagram
 		)
 		SELECT
 			u.id,
@@ -130,6 +133,7 @@ func GetEventDetail(c *gin.Context) {
 			u.start_date,
 			u.location,
 			u.requirements,
+			u.instagram,
 			COALESCE(o.name, ''),
 			COALESCE(o.slug, ''),
 			COALESCE(o.logo_url, ''),
@@ -144,6 +148,7 @@ func GetEventDetail(c *gin.Context) {
 		description, imageURL          sql.NullString
 		startDate                      sql.NullTime
 		locationJSON, requirementsJSON []byte
+		instagram                      sql.NullString
 		orgName, orgSlug, orgLogoURL   string
 		orgFeePercent, orgFeeFixed     float64
 	)
@@ -151,6 +156,7 @@ func GetEventDetail(c *gin.Context) {
 	err := db.QueryRow(queryEvent, slug).Scan(
 		&id, &title, &description, &imageURL, &startDate,
 		&locationJSON, &requirementsJSON,
+		&instagram,
 		&orgName, &orgSlug, &orgLogoURL,
 		&orgFeePercent, &orgFeeFixed,
 	)
@@ -213,6 +219,7 @@ func GetEventDetail(c *gin.Context) {
 		Description:  description.String,
 		ImageURL:     imageURL.String,
 		Date:         dateStr,
+		Instagram:    instagram.String,
 		LocationName: locData.VenueName,
 		Address: Address{
 			Street:       locData.Street,
@@ -238,12 +245,29 @@ func GetEventDetail(c *gin.Context) {
 	}
 
 	// ------------------------------------------------------------------
-	// 2. LOTES OFICIAIS — apenas price base, sem cálculo de taxa
+	// 2. LOTES OFICIAIS — retorna todos, com flag de disponibilidade
 	// ------------------------------------------------------------------
 	queryOfficial := `
-		SELECT id, name, COALESCE(description, ''), price, COALESCE(fee_payer, 'buyer')
+		SELECT
+			id,
+			name,
+			COALESCE(description, ''),
+			price,
+			COALESCE(fee_payer, 'buyer'),
+			(
+				status = 'active'
+				AND (start_date IS NULL OR start_date <= NOW())
+				AND (end_date IS NULL OR end_date > NOW())
+				AND quantity_sold < quantity_total
+			) AS available,
+			CASE
+				WHEN quantity_sold >= quantity_total               THEN 'sold_out'
+				WHEN end_date IS NOT NULL AND end_date <= NOW()    THEN 'expired'
+				WHEN start_date IS NOT NULL AND start_date > NOW() THEN 'not_started'
+				ELSE ''
+			END AS unavailable_reason
 		FROM ticket_batches
-		WHERE event_id = $1 AND status = 'active'
+		WHERE event_id = $1
 		ORDER BY price ASC;
 	`
 	rowsOfficial, err := db.Query(queryOfficial, id)
@@ -252,22 +276,30 @@ func GetEventDetail(c *gin.Context) {
 		defer rowsOfficial.Close()
 		for rowsOfficial.Next() {
 			var l OfficialLot
-			if err := rowsOfficial.Scan(&l.ID, &l.Title, &l.Subtitle, &l.Price, &l.FeePayer); err != nil {
+			if err := rowsOfficial.Scan(
+				&l.ID, &l.Title, &l.Subtitle, &l.Price, &l.FeePayer,
+				&l.Available, &l.UnavailableReason,
+			); err != nil {
+				log.Printf("GetEventDetail scan lot: %v", err)
 				continue
 			}
 			officialLots = append(officialLots, l)
 		}
+	} else {
+		log.Printf("GetEventDetail officialLots: %v", err)
 	}
 
 	// ------------------------------------------------------------------
-	// 3. REPPY MARKET — apenas price base
+	// 3. REPPY MARKET — apenas listings ativos com ticket válido
 	// ------------------------------------------------------------------
 	queryMarket := `
 		SELECT m.id, tb.name, COALESCE(tb.description, ''), m.price
 		FROM market_listings m
 		JOIN tickets t         ON m.ticket_id = t.id
 		JOIN ticket_batches tb ON t.batch_id  = tb.id
-		WHERE m.event_id = $1 AND m.status = 'active'
+		WHERE m.event_id = $1
+		  AND m.status = 'active'
+		  AND t.status = 'valid'
 		ORDER BY m.price ASC;
 	`
 	rowsMarket, err := db.Query(queryMarket, id)
@@ -277,10 +309,13 @@ func GetEventDetail(c *gin.Context) {
 		for rowsMarket.Next() {
 			var m MarketLot
 			if err := rowsMarket.Scan(&m.ID, &m.Title, &m.Subtitle, &m.Price); err != nil {
+				log.Printf("GetEventDetail scan market: %v", err)
 				continue
 			}
 			marketLots = append(marketLots, m)
 		}
+	} else {
+		log.Printf("GetEventDetail marketLots: %v", err)
 	}
 
 	if officialLots == nil {

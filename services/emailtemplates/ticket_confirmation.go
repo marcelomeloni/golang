@@ -1,0 +1,185 @@
+package emailtemplates
+
+import "strings"
+
+// TicketConfirmationData contém as variáveis usadas no template de confirmação.
+type TicketConfirmationData struct {
+	NomeUsuario string
+	EventoNome  string
+	EventoData  string
+	EventoHora  string
+	EventoLocal string
+	LoteNome    string
+	QRCode      string   // código do ingresso (ex: RPY-A1B2C3D4)
+	Ingressos   []TicketLine // para pedidos com múltiplos ingressos
+}
+
+type TicketLine struct {
+	QRCode    string
+	LoteNome  string
+}
+
+// TicketConfirmationHTML retorna o HTML do e-mail de confirmação de compra.
+// As variáveis são substituídas pelo emailsender via {{CHAVE}}.
+const TicketConfirmationHTML = `<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Seu ingresso chegou</title>
+</head>
+<body style="margin:0;padding:0;background:#F7F7F2;font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;">
+
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#F7F7F2;padding:40px 16px;">
+    <tr>
+      <td align="center">
+        <table width="560" cellpadding="0" cellspacing="0" style="max-width:560px;width:100%;">
+
+          <!-- Header -->
+          <tr>
+            <td style="padding-bottom:28px;">
+              <span style="font-size:24px;font-weight:900;color:#1BFF11;letter-spacing:-0.5px;">reppy</span>
+            </td>
+          </tr>
+
+          <!-- Card principal -->
+          <tr>
+            <td style="background:#0A0A0A;border-radius:24px;overflow:hidden;">
+
+              <!-- Banner superior -->
+              <table width="100%" cellpadding="0" cellspacing="0">
+                <tr>
+                  <td style="background:linear-gradient(135deg,#0A0A0A 0%,#0d2b0c 100%);padding:32px 32px 24px;border-bottom:1px solid #1e1e1e;">
+                    <p style="margin:0 0 6px;font-size:11px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:#5C5C52;">
+                      ingresso confirmado
+                    </p>
+                    <h1 style="margin:0;font-size:26px;font-weight:900;color:#FFFFFF;letter-spacing:-0.8px;line-height:1.1;">
+                      {{EVENTO_NOME}}
+                    </h1>
+                  </td>
+                </tr>
+              </table>
+
+              <!-- Detalhes do evento -->
+              <table width="100%" cellpadding="0" cellspacing="0">
+                <tr>
+                  <td style="padding:24px 32px;border-bottom:1px solid #1e1e1e;">
+                    <table cellpadding="0" cellspacing="0">
+                      <tr>
+                        <td style="padding-bottom:12px;">
+                          <span style="font-size:12px;color:#9A9A8F;">📅&nbsp;</span>
+                          <span style="font-size:14px;color:#F7F7F2;font-weight:600;">{{EVENTO_DATA}} · {{EVENTO_HORA}}</span>
+                        </td>
+                      </tr>
+                      <tr>
+                        <td>
+                          <span style="font-size:12px;color:#9A9A8F;">📍&nbsp;</span>
+                          <span style="font-size:14px;color:#F7F7F2;font-weight:600;">{{EVENTO_LOCAL}}</span>
+                        </td>
+                      </tr>
+                    </table>
+                  </td>
+                </tr>
+              </table>
+
+              <!-- QR Code e código -->
+              <table width="100%" cellpadding="0" cellspacing="0">
+                <tr>
+                  <td style="padding:28px 32px;text-align:center;border-bottom:1px solid #1e1e1e;">
+
+                    <p style="margin:0 0 16px;font-size:11px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:#5C5C52;">
+                      seu ingresso
+                    </p>
+
+                    <!-- QR gerado externamente e passado como URL de imagem -->
+                    <img
+                      src="https://api.qrserver.com/v1/create-qr-code/?size=160x160&data={{QRCODE}}&bgcolor=ffffff&color=0a0a0a&qzone=2"
+                      width="160"
+                      height="160"
+                      alt="QR Code {{QRCODE}}"
+                      style="display:block;margin:0 auto 16px;border-radius:12px;border:4px solid #1a1a1a;"
+                    />
+
+                    <div style="display:inline-block;background:#1a1a1a;border:1px solid #2a2a2a;border-radius:100px;padding:8px 20px;">
+                      <span style="font-size:13px;font-weight:700;color:#9A9A8F;letter-spacing:0.12em;text-transform:uppercase;">
+                        {{QRCODE}}
+                      </span>
+                    </div>
+
+                    <p style="margin:12px 0 0;font-size:11px;color:#5C5C52;">
+                      {{LOTE_NOME}}
+                    </p>
+
+                  </td>
+                </tr>
+              </table>
+
+              <!-- CTA -->
+              <table width="100%" cellpadding="0" cellspacing="0">
+                <tr>
+                  <td style="padding:24px 32px;text-align:center;">
+                    <a
+                      href="https://reppy.com.br/meus-ingressos"
+                      style="display:inline-block;background:#1BFF11;color:#0A0A0A;font-size:14px;font-weight:800;text-decoration:none;padding:14px 32px;border-radius:100px;letter-spacing:0.02em;"
+                    >
+                      Ver meus ingressos
+                    </a>
+                  </td>
+                </tr>
+              </table>
+
+            </td>
+          </tr>
+
+          <!-- Aviso -->
+          <tr>
+            <td style="padding:20px 0 4px;">
+              <table width="100%" cellpadding="0" cellspacing="0" style="background:#FFFFFF;border:1px solid #E0E0D8;border-radius:16px;padding:16px 20px;">
+                <tr>
+                  <td style="padding:16px 20px;">
+                    <p style="margin:0;font-size:12px;color:#5C5C52;line-height:1.6;">
+                      ⚡ Apresente este QR Code na entrada do evento. Não compartilhe com ninguém — é pessoal e intransferível (a menos que você transfira pelo app).
+                    </p>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+
+          <!-- Footer -->
+          <tr>
+            <td style="padding:24px 0 8px;text-align:center;">
+              <p style="margin:0;font-size:11px;color:#9A9A8F;">
+                Oi, {{NOME}}! Qualquer dúvida, responda este e-mail.
+              </p>
+              <p style="margin:6px 0 0;font-size:11px;color:#5C5C52;">
+                reppy.com.br · O hub da vida social universitária
+              </p>
+            </td>
+          </tr>
+
+        </table>
+      </td>
+    </tr>
+  </table>
+
+</body>
+</html>`
+
+// BuildTicketConfirmation retorna a mensagem pronta para passar ao emailsender.
+// Recebe os dados e retorna o HTML com as variáveis já substituídas.
+func BuildTicketConfirmation(d TicketConfirmationData) (subject string, html string) {
+	subject = "Seu ingresso para " + d.EventoNome + " chegou 🎉"
+
+	r := strings.NewReplacer(
+		"{{NOME}}",        d.NomeUsuario,
+		"{{EVENTO_NOME}}", d.EventoNome,
+		"{{EVENTO_DATA}}", d.EventoData,
+		"{{EVENTO_HORA}}", d.EventoHora,
+		"{{EVENTO_LOCAL}}", d.EventoLocal,
+		"{{LOTE_NOME}}",   d.LoteNome,
+		"{{QRCODE}}",      d.QRCode,
+	)
+
+	return subject, r.Replace(TicketConfirmationHTML)
+}

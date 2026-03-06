@@ -1,6 +1,7 @@
 package organizer
 
 import (
+
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -24,7 +25,7 @@ func SaveDraftHandler(c *gin.Context) {
 	userID, _ := c.Get("userID")
 	uid := userID.(string)
 
-	db  := config.GetDB()
+	db := config.GetDB()
 	ctx := c.Request.Context()
 
 	orgID, err := orgservice.ResolveOrgWithPermission(ctx, db, orgSlug, uid)
@@ -74,13 +75,13 @@ func SaveDraftHandler(c *gin.Context) {
 	eventID := uuid.New().String()
 	_, err = tx.ExecContext(ctx,
 		`INSERT INTO events
-		   (id, organization_id, title, slug, description, category,
-		    instagram, status, start_date, end_date, location, requirements, geolocation)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,'draft',$8,$9,$10,$11,
-		   CASE WHEN $12::float8 IS NOT NULL
-		        THEN ST_SetSRID(ST_MakePoint($13::float8, $12::float8), 4326)
-		        ELSE NULL END
-		 )`,
+           (id, organization_id, title, slug, description, category,
+            instagram, status, start_date, end_date, location, requirements, geolocation)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,'draft',$8,$9,$10,$11,
+           CASE WHEN $12::float8 IS NOT NULL
+                THEN ST_SetSRID(ST_MakePoint($13::float8, $12::float8), 4326)
+                ELSE NULL END
+         )`,
 		eventID, orgID,
 		body.Title, eventSlug,
 		dbutil.NullableText(body.Description),
@@ -116,14 +117,14 @@ func SaveDraftHandler(c *gin.Context) {
 	})
 }
 
-// UpdateEventHandler — PATCH /org/:slug/events/:eventID
+// UpdateEventHandler — PATCH /org/:slug/events/:id
 func UpdateEventHandler(c *gin.Context) {
 	orgSlug := c.Param("slug")
-	eventID := c.Param("eventID")
+	eventID := c.Param("id")
 	userID, _ := c.Get("userID")
 	uid := userID.(string)
 
-	db  := config.GetDB()
+	db := config.GetDB()
 	ctx := c.Request.Context()
 
 	if _, err := orgservice.ResolveOrgWithPermission(ctx, db, orgSlug, uid); err != nil {
@@ -143,7 +144,7 @@ func UpdateEventHandler(c *gin.Context) {
 		return
 	}
 
-	locationJSON, _     := json.Marshal(body.Location)
+	locationJSON, _ := json.Marshal(body.Location)
 	requirementsJSON, _ := json.Marshal(body.Requirements)
 
 	// Regeocodifica só se a localização foi enviada nesta requisição
@@ -161,21 +162,21 @@ func UpdateEventHandler(c *gin.Context) {
 
 	_, err = tx.ExecContext(ctx,
 		`UPDATE events
-		    SET title        = COALESCE($1, title),
-		        description  = COALESCE($2, description),
-		        category     = COALESCE($3, category),
-		        instagram    = COALESCE($4, instagram),
-		        start_date   = COALESCE($5, start_date),
-		        end_date     = COALESCE($6, end_date),
-		        location     = COALESCE($7, location),
-		        requirements = COALESCE($8, requirements),
-		        geolocation  = CASE
-		                         WHEN $9::float8 IS NOT NULL
-		                         THEN ST_SetSRID(ST_MakePoint($10::float8, $9::float8), 4326)
-		                         ELSE geolocation
-		                       END,
-		        updated_at   = now()
-		  WHERE id = $11`,
+            SET title        = COALESCE($1, title),
+                description  = COALESCE($2, description),
+                category     = COALESCE($3, category),
+                instagram    = COALESCE($4, instagram),
+                start_date   = COALESCE($5, start_date),
+                end_date     = COALESCE($6, end_date),
+                location     = COALESCE($7, location),
+                requirements = COALESCE($8, requirements),
+                geolocation  = CASE
+                                 WHEN $9::float8 IS NOT NULL
+                                 THEN ST_SetSRID(ST_MakePoint($10::float8, $9::float8), 4326)
+                                 ELSE geolocation
+                               END,
+                updated_at   = now()
+          WHERE id = $11`,
 		body.Title, body.Description, body.Category, body.Instagram,
 		startDate, endDate,
 		dbutil.NullableJSON(locationJSON),
@@ -209,14 +210,14 @@ func UpdateEventHandler(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "evento atualizado"})
 }
 
-// PublishEventHandler — PATCH /org/:slug/events/:eventID/publish
+// PublishEventHandler — PATCH /org/:slug/events/:id/publish
 func PublishEventHandler(c *gin.Context) {
 	orgSlug := c.Param("slug")
-	eventID := c.Param("eventID")
+	eventID := c.Param("id")
 	userID, _ := c.Get("userID")
 	uid := userID.(string)
 
-	db  := config.GetDB()
+	db := config.GetDB()
 	ctx := c.Request.Context()
 
 	if _, err := orgservice.ResolveOrgWithPermission(ctx, db, orgSlug, uid); err != nil {
@@ -257,14 +258,14 @@ func PublishEventHandler(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "evento publicado com sucesso"})
 }
 
-// CancelEventHandler — PATCH /org/:slug/events/:eventID/cancel
+// CancelEventHandler — PATCH /org/:slug/events/:id/cancel
 func CancelEventHandler(c *gin.Context) {
 	orgSlug := c.Param("slug")
-	eventID := c.Param("eventID")
+	eventID := c.Param("id")
 	userID, _ := c.Get("userID")
 	uid := userID.(string)
 
-	db  := config.GetDB()
+	db := config.GetDB()
 	ctx := c.Request.Context()
 
 	orgID, err := orgservice.ResolveOrgWithPermission(ctx, db, orgSlug, uid)
@@ -277,11 +278,11 @@ func CancelEventHandler(c *gin.Context) {
 	var ticketsSold int
 	err = db.QueryRowContext(ctx,
 		`SELECT e.status, COUNT(t.id)
-		   FROM events e
-		   LEFT JOIN orders o  ON o.event_id = e.id AND o.status = 'paid'
-		   LEFT JOIN tickets t ON t.order_id = o.id
-		  WHERE e.id = $1 AND e.organization_id = $2
-		  GROUP BY e.status`,
+           FROM events e
+           LEFT JOIN orders o  ON o.event_id = e.id AND o.status = 'paid'
+           LEFT JOIN tickets t ON t.order_id = o.id
+          WHERE e.id = $1 AND e.organization_id = $2
+          GROUP BY e.status`,
 		eventID, orgID,
 	).Scan(&status, &ticketsSold)
 	if err != nil {
@@ -316,14 +317,14 @@ func CancelEventHandler(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "evento cancelado", "tickets_sold": ticketsSold})
 }
 
-// UploadEventBannerHandler — POST /org/:slug/events/:eventID/banner
+// UploadEventBannerHandler — POST /org/:slug/events/:id/banner
 func UploadEventBannerHandler(c *gin.Context) {
 	orgSlug := c.Param("slug")
-	eventID := c.Param("eventID")
+	eventID := c.Param("id")
 	userID, _ := c.Get("userID")
 	uid := userID.(string)
 
-	db  := config.GetDB()
+	db := config.GetDB()
 	ctx := c.Request.Context()
 
 	if _, err := orgservice.ResolveOrgWithPermission(ctx, db, orgSlug, uid); err != nil {
@@ -373,17 +374,17 @@ func fetchEventSnapshot(ctx context.Context, db *sql.DB, eventID string) (*event
 	var snap eventSnapshot
 	err := db.QueryRowContext(ctx,
 		`SELECT
-		   e.status, e.title, e.category, e.image_url,
-		   e.start_date, e.end_date,
-		   e.location->>'city' AS location_city,
-		   e.requirements,
-		   COUNT(tb.id) AS batch_count
-		  FROM events e
-		  LEFT JOIN ticket_categories tc ON tc.event_id = e.id
-		  LEFT JOIN ticket_batches tb    ON tb.category_id = tc.id AND tb.status = 'active'
-		 WHERE e.id = $1
-		 GROUP BY e.status, e.title, e.category, e.image_url,
-		          e.start_date, e.end_date, e.location, e.requirements`,
+           e.status, e.title, e.category, e.image_url,
+           e.start_date, e.end_date,
+           e.location->>'city' AS location_city,
+           e.requirements,
+           COUNT(tb.id) AS batch_count
+          FROM events e
+          LEFT JOIN ticket_categories tc ON tc.event_id = e.id
+          LEFT JOIN ticket_batches tb    ON tb.category_id = tc.id AND tb.status = 'active'
+         WHERE e.id = $1
+         GROUP BY e.status, e.title, e.category, e.image_url,
+                  e.start_date, e.end_date, e.location, e.requirements`,
 		eventID,
 	).Scan(
 		&snap.Status, &snap.Title, &snap.Category,
@@ -447,8 +448,12 @@ func parseDatePair(start, end string) (*time.Time, *time.Time, error) {
 
 func parseDatePairPtr(start, end *string) (*time.Time, *time.Time, error) {
 	var s, e string
-	if start != nil { s = *start }
-	if end != nil   { e = *end }
+	if start != nil {
+		s = *start
+	}
+	if end != nil {
+		e = *end
+	}
 	return parseDatePair(s, e)
 }
 

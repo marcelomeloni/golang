@@ -91,11 +91,10 @@ func GetOrgEventsHandler(c *gin.Context) {
 	c.JSON(http.StatusOK, events)
 }
 
-// GetOrgEventDetailHandler — GET /org/:slug/events/:eventID
-// Retorna dados completos do evento com categorias e lotes aninhados.
+
 func GetOrgEventDetailHandler(c *gin.Context) {
 	orgSlug := c.Param("slug")
-	eventID := c.Param("eventID")
+	eventID := c.Param("id")
 	userID, _ := c.Get("userID")
 	uid := userID.(string)
 

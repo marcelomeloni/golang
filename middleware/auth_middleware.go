@@ -32,6 +32,22 @@ func InitJWKS() {
 	}
 }
 
+// parseUserID valida o JWT e retorna o "sub" (userID).
+// Retorna "" se o token for inválido ou não contiver sub.
+func parseUserID(tokenStr string) string {
+	token, err := jwt.Parse(tokenStr, jwks.Keyfunc)
+	if err != nil || !token.Valid {
+		return ""
+	}
+	claims, ok := token.Claims.(jwt.MapClaims)
+	if !ok {
+		return ""
+	}
+	sub, _ := claims["sub"].(string)
+	return sub
+}
+
+// AuthMiddleware exige token válido — aborta com 401 se ausente ou inválido.
 func AuthMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		authHeader := c.GetHeader("Authorization")
@@ -46,25 +62,28 @@ func AuthMiddleware() gin.HandlerFunc {
 			return
 		}
 
-		token, err := jwt.Parse(parts[1], jwks.Keyfunc)
-		if err != nil || !token.Valid {
+		sub := parseUserID(parts[1])
+		if sub == "" {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "token inválido ou expirado"})
 			return
 		}
 
-		claims, ok := token.Claims.(jwt.MapClaims)
-		if !ok {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "claims inválidas"})
-			return
-		}
-
-		sub, ok := claims["sub"].(string)
-		if !ok || sub == "" {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "sub ausente no token"})
-			return
-		}
-
 		c.Set("userID", sub)
+		c.Next()
+	}
+}
+
+// OptionalAuth lê o token se presente e seta "userID" no contexto.
+// Não bloqueia a requisição se não houver token ou se for inválido (guest).
+func OptionalAuth() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		auth := c.GetHeader("Authorization")
+		if strings.HasPrefix(auth, "Bearer ") {
+			tokenStr := strings.TrimPrefix(auth, "Bearer ")
+			if userID := parseUserID(tokenStr); userID != "" {
+				c.Set("userID", userID)
+			}
+		}
 		c.Next()
 	}
 }

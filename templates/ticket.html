@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Ingresso — {{.Evento.Nome}}</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@700;800&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <!-- QR Code gerado no cliente via lib leve -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: #F7F7F2;
+      font-family: 'Plus Jakarta Sans', sans-serif;
+      display: flex;
+      justify-content: center;
+      align-items: flex-start;
+      min-height: 100vh;
+      padding: 40px 16px 60px;
+      -webkit-print-color-adjust: exact;
+      print-color-adjust: exact;
+    }
+
+    /* ── Card ── */
+    .ticket {
+      width: 100%;
+      max-width: 420px;
+      background: #0A0A0A;
+      border-radius: 28px;
+      overflow: hidden;
+      box-shadow: 0 24px 64px rgba(0,0,0,0.22);
+    }
+
+    /* ── Banner ── */
+    .ticket__banner {
+      position: relative;
+      width: 100%;
+      height: 200px;
+      background: #111;
+      overflow: hidden;
+    }
+    .ticket__banner img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      opacity: 0.75;
+    }
+    .ticket__banner-overlay {
+      position: absolute;
+      inset: 0;
+      background: linear-gradient(to bottom, transparent 30%, #0A0A0A 100%);
+    }
+    /* Logo reppy no canto */
+    .ticket__brand {
+      position: absolute;
+      top: 16px;
+      left: 20px;
+      font-family: 'Bricolage Grotesque', sans-serif;
+      font-weight: 800;
+      font-size: 22px;
+      color: #1BFF11;
+      letter-spacing: -0.5px;
+    }
+
+    /* ── Body ── */
+    .ticket__body {
+      padding: 0 24px 0;
+    }
+
+    .ticket__event-name {
+      font-family: 'Bricolage Grotesque', sans-serif;
+      font-weight: 800;
+      font-size: 26px;
+      color: #FFFFFF;
+      letter-spacing: -0.8px;
+      line-height: 1.1;
+      margin-bottom: 16px;
+    }
+
+    .ticket__meta {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      margin-bottom: 24px;
+    }
+    .ticket__meta-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 13px;
+      color: #9A9A8F;
+    }
+    .ticket__meta-row strong {
+      color: #F7F7F2;
+      font-weight: 600;
+    }
+    .ticket__meta-dot {
+      width: 3px;
+      height: 3px;
+      border-radius: 50%;
+      background: #5C5C52;
+      flex-shrink: 0;
+    }
+
+    /* ── Lote badge ── */
+    .ticket__batch {
+      display: inline-flex;
+      align-items: center;
+      background: #1a1a1a;
+      border: 1px solid #2a2a2a;
+      border-radius: 100px;
+      padding: 4px 12px;
+      font-size: 11px;
+      font-weight: 700;
+      color: #9A9A8F;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      margin-bottom: 24px;
+    }
+
+    /* ── Divider pontilhado ── */
+    .ticket__divider {
+      position: relative;
+      display: flex;
+      align-items: center;
+      margin: 0 -24px 24px;
+    }
+    .ticket__divider::before,
+    .ticket__divider::after {
+      content: '';
+      width: 20px;
+      height: 20px;
+      border-radius: 50%;
+      background: #F7F7F2;
+      flex-shrink: 0;
+    }
+    .ticket__divider-line {
+      flex: 1;
+      border-top: 1.5px dashed #2a2a2a;
+    }
+
+    /* ── QR ── */
+    .ticket__qr-section {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 12px;
+      padding-bottom: 28px;
+    }
+    .ticket__qr-wrap {
+      background: #FFFFFF;
+      border-radius: 16px;
+      padding: 12px;
+      width: 160px;
+      height: 160px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    /* o canvas/img gerado pelo qrcodejs */
+    .ticket__qr-wrap canvas,
+    .ticket__qr-wrap img { display: block; }
+
+    .ticket__qr-code {
+      font-family: 'Plus Jakarta Sans', sans-serif;
+      font-size: 13px;
+      font-weight: 700;
+      color: #5C5C52;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+    }
+
+    /* ── Footer ── */
+    .ticket__footer {
+      background: #111;
+      border-top: 1px solid #1e1e1e;
+      padding: 14px 24px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .ticket__footer-label {
+      font-size: 10px;
+      font-weight: 700;
+      color: #5C5C52;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+    }
+    .ticket__footer-value {
+      font-size: 12px;
+      font-weight: 600;
+      color: #9A9A8F;
+    }
+
+    /* ── Status badge sobreposto (se encerrado/usado) ── */
+    .ticket__status-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      background: rgba(255,255,255,0.06);
+      border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 100px;
+      padding: 5px 14px;
+      font-size: 11px;
+      font-weight: 700;
+      color: #9A9A8F;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      margin-bottom: 16px;
+    }
+    .ticket__status-badge--usado { color: #1BFF11; border-color: rgba(27,255,17,0.25); }
+
+    /* Print */
+    @media print {
+      body { background: white; padding: 0; }
+      .ticket { box-shadow: none; max-width: 100%; }
+    }
+  </style>
+</head>
+<body>
+
+<div class="ticket">
+
+  <!-- Banner -->
+  <div class="ticket__banner">
+    {{if .Evento.ImageURL}}
+      <img src="{{.Evento.ImageURL}}" alt="{{.Evento.Nome}}" />
+    {{end}}
+    <div class="ticket__banner-overlay"></div>
+    <span class="ticket__brand">reppy</span>
+  </div>
+
+  <!-- Body -->
+  <div class="ticket__body">
+
+    <!-- Status badge (só aparece se não for ativo) -->
+    {{if eq .Status "usado"}}
+      <div style="padding-top:20px;">
+        <span class="ticket__status-badge ticket__status-badge--usado">✓ Utilizado</span>
+      </div>
+    {{else if eq .Status "encerrado"}}
+      <div style="padding-top:20px;">
+        <span class="ticket__status-badge">Encerrado</span>
+      </div>
+    {{else}}
+      <div style="padding-top:20px;"></div>
+    {{end}}
+
+    <h1 class="ticket__event-name">{{.Evento.Nome}}</h1>
+
+    <div class="ticket__meta">
+      <div class="ticket__meta-row">
+        <strong>{{.Evento.Data}}</strong>
+        {{if .Evento.Hora}}
+          <span class="ticket__meta-dot"></span>
+          <span>{{.Evento.Hora}}</span>
+        {{end}}
+      </div>
+      {{if .Evento.Local}}
+        <div class="ticket__meta-row">
+          <span>{{.Evento.Local}}</span>
+        </div>
+      {{end}}
+    </div>
+
+    {{if .LoteName}}
+      <div class="ticket__batch">{{.LoteName}}</div>
+    {{end}}
+
+    <!-- Divider -->
+    <div class="ticket__divider">
+      <div class="ticket__divider-line"></div>
+    </div>
+
+    <!-- QR Code -->
+  <div class="ticket__qr-section">
+    <div class="ticket__qr-wrap">
+        <img src="data:image/png;base64,{{.QRBase64}}" width="136" height="136" />
+    </div>
+    <span class="ticket__qr-code">{{.QRCode}}</span>
+</div>
+
+  </div>
+
+  <!-- Footer -->
+  <div class="ticket__footer">
+    <div>
+      <div class="ticket__footer-label">Powered by</div>
+      <div class="ticket__footer-value">reppy.com.br</div>
+    </div>
+    <div style="text-align:right;">
+      <div class="ticket__footer-label">ID do ingresso</div>
+      <div class="ticket__footer-value">{{.ID}}</div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+  new QRCode(document.getElementById("qrcode"), {
+    text: "{{.QRCode}}",
+    width: 136,
+    height: 136,
+    colorDark: "#0A0A0A",
+    colorLight: "#FFFFFF",
+    correctLevel: QRCode.CorrectLevel.H,
+  });
+</script>
+
+</body>
+</html>
