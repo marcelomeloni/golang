@@ -1,3 +1,4 @@
+// main.go
 package main
 
 import (
@@ -6,6 +7,8 @@ import (
 
 	"bilheteria-api/config"
 	"bilheteria-api/middleware"
+	
+	clientRoutes "bilheteria-api/routes/client"       // 👈 NOVO IMPORT
 	organizerRoutes "bilheteria-api/routes/organizer"
 
 	"github.com/gin-gonic/gin"
@@ -42,7 +45,9 @@ func main() {
 	})
 	// ─────────────────────────────────────────────────────────────────────────
 
+	// Registra as rotas das duas "frentes" da sua aplicação
 	organizerRoutes.Register(r)
+	clientRoutes.Register(r) // 👈 NOVA LINHA AQUI
 
 	port := os.Getenv("PORT")
 	if port == "" {

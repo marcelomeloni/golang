@@ -6,11 +6,10 @@ import (
 	"bilheteria-api/config"
 	"bilheteria-api/services/orgservice"
 	"github.com/gin-gonic/gin"
+	"github.com/lib/pq"
 )
 
-// ─── CUPONS ──────────────────────────────────────────────────────────────────
 
-// GetCouponsHandler — GET /org/:slug/events/:id/coupons
 func GetCouponsHandler(c *gin.Context) {
 	orgSlug := c.Param("slug")
 	eventID := c.Param("id")
@@ -38,13 +37,24 @@ func GetCouponsHandler(c *gin.Context) {
 
 	rows, err := db.QueryContext(ctx, `
 		SELECT
-		  c.id, c.code, c.discount_type, c.discount_value,
-		  c.max_uses, c.used_count,
+		  c.id,
+		  c.code,
+		  c.discount_type,
+		  c.discount_value,
+		  c.max_uses,
+		  c.used_count,
 		  to_char(c.expires_at, 'YYYY-MM-DD"T"HH24:MI:SS'),
 		  c.active,
-		  to_char(c.created_at, 'YYYY-MM-DD')
+		  to_char(c.created_at, 'YYYY-MM-DD'),
+		  -- agrega os batch_ids vinculados em array (NULL se não houver)
+		  COALESCE(
+		    ARRAY_AGG(cb.batch_id::text) FILTER (WHERE cb.batch_id IS NOT NULL),
+		    ARRAY[]::text[]
+		  ) AS batch_ids
 		FROM coupons c
+		LEFT JOIN coupon_batches cb ON cb.coupon_id = c.id
 		WHERE c.event_id = $1
+		GROUP BY c.id
 		ORDER BY c.created_at DESC`, eventID,
 	)
 	if err != nil {
@@ -56,17 +66,19 @@ func GetCouponsHandler(c *gin.Context) {
 	coupons := []gin.H{}
 	for rows.Next() {
 		var (
-			cID, cCode, cDiscType    string
-			cDiscValue               float64
-			cMaxUses, cUsedCount     *int
-			cExpiresAt               *string
-			cActive                  bool
-			cCreatedAt               string
+			cID, cCode, cDiscType string
+			cDiscValue            float64
+			cMaxUses, cUsedCount  *int
+			cExpiresAt            *string
+			cActive               bool
+			cCreatedAt            string
+			cBatchIDs             []string
 		)
 		if err := rows.Scan(
 			&cID, &cCode, &cDiscType, &cDiscValue,
 			&cMaxUses, &cUsedCount, &cExpiresAt,
 			&cActive, &cCreatedAt,
+			pq.Array(&cBatchIDs),
 		); err != nil {
 			continue
 		}
@@ -80,11 +92,13 @@ func GetCouponsHandler(c *gin.Context) {
 			"expires_at":     cExpiresAt,
 			"active":         cActive,
 			"created_at":     cCreatedAt,
+			"batch_ids":      cBatchIDs, // [] = todos os lotes, [id1, id2] = específicos
 		})
 	}
 
 	c.JSON(http.StatusOK, coupons)
 }
+
 
 // CreateCouponHandler — POST /org/:slug/events/:id/coupons
 func CreateCouponHandler(c *gin.Context) {
@@ -118,6 +132,7 @@ func CreateCouponHandler(c *gin.Context) {
 		DiscountValue float64  `json:"discount_value" binding:"required"`
 		MaxUses       *int     `json:"max_uses"`
 		ExpiresAt     *string  `json:"expires_at"`
+		BatchIDs      []string `json:"batch_ids"` // vazio = aplica a todos
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -129,19 +144,72 @@ func CreateCouponHandler(c *gin.Context) {
 		return
 	}
 
+	// Valida que os batch_ids informados pertencem ao evento
+	if len(body.BatchIDs) > 0 {
+		var validCount int
+		err = db.QueryRowContext(ctx, `
+			SELECT COUNT(*)
+			  FROM ticket_batches tb
+			  JOIN ticket_categories tc ON tc.id = tb.category_id
+			 WHERE tc.event_id = $1
+			   AND tb.id = ANY($2::uuid[])`,
+			eventID, pq.Array(body.BatchIDs),
+		).Scan(&validCount)
+		if err != nil || validCount != len(body.BatchIDs) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "um ou mais lotes inválidos para este evento"})
+			return
+		}
+	}
+
+	// ── Tudo em transação ────────────────────────────────────────────────────
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao iniciar transação"})
+		return
+	}
+	defer tx.Rollback()
+
+	// 1. Insere o cupom
 	var newID string
-	err = db.QueryRowContext(ctx, `
-		INSERT INTO coupons (event_id, code, discount_type, discount_value, max_uses, expires_at, active)
+	err = tx.QueryRowContext(ctx, `
+		INSERT INTO coupons
+		  (event_id, code, discount_type, discount_value, max_uses, expires_at, active)
 		VALUES ($1, UPPER($2), $3, $4, $5, $6::timestamptz, true)
 		RETURNING id`,
-		eventID, body.Code, body.DiscountType, body.DiscountValue, body.MaxUses, body.ExpiresAt,
+		eventID, body.Code, body.DiscountType, body.DiscountValue,
+		body.MaxUses, body.ExpiresAt,
 	).Scan(&newID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao criar cupom"})
+		// Código duplicado → unique constraint
+		c.JSON(http.StatusConflict, gin.H{"error": "já existe um cupom com esse código neste evento"})
 		return
 	}
 
-	c.JSON(http.StatusCreated, gin.H{"id": newID})
+	// 2. Insere os vínculos com lotes (se informados)
+	if len(body.BatchIDs) > 0 {
+		for _, batchID := range body.BatchIDs {
+			_, err = tx.ExecContext(ctx, `
+				INSERT INTO coupon_batches (coupon_id, batch_id)
+				VALUES ($1, $2)
+				ON CONFLICT (coupon_id, batch_id) DO NOTHING`,
+				newID, batchID,
+			)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao vincular lote ao cupom"})
+				return
+			}
+		}
+	}
+
+	if err = tx.Commit(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao confirmar transação"})
+		return
+	}
+
+	c.JSON(http.StatusCreated, gin.H{
+		"id":        newID,
+		"batch_ids": body.BatchIDs,
+	})
 }
 
 // PatchCouponHandler — PATCH /org/:slug/events/:id/coupons/:couponID

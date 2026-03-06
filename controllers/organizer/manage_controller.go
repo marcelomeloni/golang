@@ -8,9 +8,6 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// GetEventManageHandler — GET /org/:slug/events/:id/manage
-// Retorna os dados base do evento + métricas de overview para o EventManageContext.
-// Acessível a qualquer membro da org.
 func GetEventManageHandler(c *gin.Context) {
 	orgSlug := c.Param("slug")
 	eventID := c.Param("id")
@@ -28,12 +25,12 @@ func GetEventManageHandler(c *gin.Context) {
 
 	// ── Dados principais do evento ────────────────────────────────────────────
 	var (
-		id, title, slug, status, createdAt       string
-		description, category, instagram         *string
-		imageURL, logoURL                        *string
-		startDate, endDate                       *string
-		location, requirements                   *string
-		views                                    int
+		id, title, slug, status, createdAt string
+		description, category, instagram   *string
+		imageURL, logoURL                  *string
+		startDate, endDate                 *string
+		location, requirements             *string
+		views                              int
 	)
 	err = db.QueryRowContext(ctx, `
 		SELECT id, title, slug, description, category, instagram, status,
@@ -54,7 +51,35 @@ func GetEventManageHandler(c *gin.Context) {
 		return
 	}
 
-	// ── Check-in summary (view) ───────────────────────────────────────────────
+	// ── Email da organização ──────────────────────────────────────────────────
+	var orgEmail *string
+	_ = db.QueryRowContext(ctx, `
+		SELECT email FROM organizations WHERE id = $1`, orgID,
+	).Scan(&orgEmail)
+
+	// ── Categorias de ingresso ────────────────────────────────────────────────
+	catRows, catErr := db.QueryContext(ctx, `
+		SELECT id, name
+		  FROM ticket_categories
+		 WHERE event_id = $1
+		 ORDER BY position ASC, created_at ASC`, eventID,
+	)
+	categories := []gin.H{}
+	if catErr == nil {
+		defer catRows.Close()
+		for catRows.Next() {
+			var cID, cName string
+			if err := catRows.Scan(&cID, &cName); err != nil {
+				continue
+			}
+			categories = append(categories, gin.H{
+				"id":   cID,
+				"name": cName,
+			})
+		}
+	}
+
+	// ── Check-in summary ──────────────────────────────────────────────────────
 	var (
 		totalTickets, totalCheckedIn, pendingCheckin int
 		checkinPct                                   float64
@@ -72,14 +97,14 @@ func GetEventManageHandler(c *gin.Context) {
 	)
 	_ = db.QueryRowContext(ctx, `
 		SELECT
-		  COALESCE(SUM(total_amount)       FILTER (WHERE status = 'paid'), 0),
-		  COALESCE(SUM(net_amount)         FILTER (WHERE status = 'paid'), 0),
-		  COALESCE(SUM(platform_fee_amount)FILTER (WHERE status = 'paid'), 0),
-		  COALESCE(SUM(discount_amount)    FILTER (WHERE status = 'paid'), 0),
-		  COUNT(*)                         FILTER (WHERE status = 'paid'),
-		  COUNT(*)                         FILTER (WHERE status IN ('cancelled','refunded'))
-		  FROM orders
-		 WHERE event_id = $1`, eventID,
+		  COALESCE(SUM(total_amount)        FILTER (WHERE status = 'paid'),                  0),
+		  COALESCE(SUM(net_amount)          FILTER (WHERE status = 'paid'),                  0),
+		  COALESCE(SUM(platform_fee_amount) FILTER (WHERE status = 'paid'),                  0),
+		  COALESCE(SUM(discount_amount)     FILTER (WHERE status = 'paid'),                  0),
+		  COUNT(*)                          FILTER (WHERE status = 'paid'),
+		  COUNT(*)                          FILTER (WHERE status IN ('cancelled','refunded'))
+		FROM orders
+		WHERE event_id = $1`, eventID,
 	).Scan(&grossRevenue, &netRevenue, &platformFee, &discountTotal,
 		&ordersApproved, &ordersCancelled)
 
@@ -110,31 +135,33 @@ func GetEventManageHandler(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{
 		"event": gin.H{
-			"id":           id,
-			"title":        title,
-			"slug":         slug,
-			"description":  description,
-			"category":     category,
-			"instagram":    instagram,
-			"status":       status,
-			"image_url":    imageURL,
-			"logo_url":     logoURL,
-			"start_date":   startDate,
-			"end_date":     endDate,
-			"location":     location,
-			"requirements": requirements,
-			"views":        views,
-			"created_at":   createdAt,
+			"id":                id,
+			"title":             title,
+			"slug":              slug,
+			"description":       description,
+			"category":          category,
+			"instagram":         instagram,
+			"status":            status,
+			"image_url":         imageURL,
+			"logo_url":          logoURL,
+			"start_date":        startDate,
+			"end_date":          endDate,
+			"location":          location,
+			"requirements":      requirements,
+			"views":             views,
+			"created_at":        createdAt,
+			"org_email":         orgEmail,
+			"ticket_categories": categories,
 		},
 		"stats": gin.H{
-			"tickets_sold":      ticketsSold,
-			"total_capacity":    totalCapacity,
-			"gross_revenue":     grossRevenue,
-			"net_revenue":       netRevenue,
-			"platform_fee":      platformFee,
-			"discount_total":    discountTotal,
-			"orders_approved":   ordersApproved,
-			"orders_cancelled":  ordersCancelled,
+			"tickets_sold":     ticketsSold,
+			"total_capacity":   totalCapacity,
+			"gross_revenue":    grossRevenue,
+			"net_revenue":      netRevenue,
+			"platform_fee":     platformFee,
+			"discount_total":   discountTotal,
+			"orders_approved":  ordersApproved,
+			"orders_cancelled": ordersCancelled,
 		},
 		"checkin": gin.H{
 			"total_tickets":    totalTickets,
