@@ -23,20 +23,20 @@ type OrganizerDetailResponse struct {
 }
 
 type OrganizerProfile struct {
-	ID         string      `json:"id"`
-	Name       string      `json:"name"`
-	Slug       string      `json:"slug"`
-	LogoURL    string      `json:"logoUrl"`
-	BannerURL  string      `json:"bannerUrl"`
-	City       string      `json:"city"`
-	Instagram  string      `json:"instagram"`
-	Facebook   string      `json:"facebook"`
-	Website    string      `json:"website"`
-	Phone      string      `json:"phone"`
-	WhatsApp   string      `json:"whatsapp"`
-	Email      string      `json:"email"`
-	Followers  int         `json:"followers"`
-	Links      []OrgLink   `json:"links"`
+	ID        string    `json:"id"`
+	Name      string    `json:"name"`
+	Slug      string    `json:"slug"`
+	LogoURL   string    `json:"logoUrl"`
+	BannerURL string    `json:"bannerUrl"`
+	City      string    `json:"city"`
+	Instagram string    `json:"instagram"`
+	Facebook  string    `json:"facebook"`
+	Website   string    `json:"website"`
+	Phone     string    `json:"phone"`
+	WhatsApp  string    `json:"whatsapp"`
+	Email     string    `json:"email"`
+	Followers int       `json:"followers"`
+	Links     []OrgLink `json:"links"`
 }
 
 type OrgLink struct {
@@ -46,14 +46,15 @@ type OrgLink struct {
 }
 
 type OrgEvent struct {
-	ID       string `json:"id"`
-	Slug     string `json:"slug"`
-	Nome     string `json:"nome"`
-	Data     string `json:"data"`
-	Hora     string `json:"hora"`
-	Local    string `json:"local"`
-	ImageURL string `json:"imagemUrl"`
-	Status   string `json:"status"` // "normal" | "encerrado" | "cancelado"
+	ID        string `json:"id"`
+	Slug      string `json:"slug"`
+	Nome      string `json:"nome"`
+	Data      string `json:"data"`
+	Hora      string `json:"hora"`
+	Local     string `json:"local"`
+	ImageURL  string `json:"imagemUrl"`
+	Status    string `json:"status"`    // "normal" | "encerrado"
+	StartDate string `json:"startDate"` // ISO 8601
 }
 
 // ==========================================
@@ -95,12 +96,12 @@ func GetOrganizerDetail(c *gin.Context) {
 	`
 
 	var (
-		orgID, orgName, orgSlug               string
-		logoURL, bannerURL, city              string
-		instagram, facebook, website          string
-		phone, whatsapp, email               string
-		linksJSON                             []byte
-		followers                             int
+		orgID, orgName, orgSlug      string
+		logoURL, bannerURL, city     string
+		instagram, facebook, website string
+		phone, whatsapp, email       string
+		linksJSON                    []byte
+		followers                    int
 	)
 
 	err := db.QueryRow(queryOrg, slug).Scan(
@@ -147,7 +148,6 @@ func GetOrganizerDetail(c *gin.Context) {
 
 	// ------------------------------------------------------------------
 	// 2. EVENTOS DA ORGANIZAÇÃO
-	// Traz publicados e cancelados/finalizados para separar no frontend
 	// ------------------------------------------------------------------
 	queryEvents := `
 		SELECT
@@ -155,12 +155,13 @@ func GetOrganizerDetail(c *gin.Context) {
 			e.slug,
 			e.title,
 			e.start_date,
+			e.end_date,
 			COALESCE(e.image_url, ''),
 			e.status,
 			COALESCE(e.location->>'venue_name', '')
 		FROM events e
 		WHERE e.organization_id = $1
-		  AND e.status IN ('published', 'finished', 'cancelled')
+		  AND e.status IN ('published', 'cancelled')
 		ORDER BY e.start_date DESC;
 	`
 
@@ -168,42 +169,56 @@ func GetOrganizerDetail(c *gin.Context) {
 	var events []OrgEvent
 	if err == nil {
 		defer rows.Close()
+
+		now := time.Now()
+
 		for rows.Next() {
 			var (
-				evID, evSlug, evTitle string
-				evStartDate           sql.NullTime
-				evImageURL, evStatus  string
-				evVenue               string
+				evID, evSlug, evTitle        string
+				evStartDate, evEndDate        sql.NullTime
+				evImageURL, evStatus          string
+				evVenue                       string
 			)
-			if err := rows.Scan(&evID, &evSlug, &evTitle, &evStartDate, &evImageURL, &evStatus, &evVenue); err != nil {
+			if err := rows.Scan(&evID, &evSlug, &evTitle, &evStartDate, &evEndDate, &evImageURL, &evStatus, &evVenue); err != nil {
 				continue
 			}
 
 			data := "Data a definir"
 			hora := ""
+			startDateISO := ""
 			if evStartDate.Valid {
 				loc, _ := time.LoadLocation("America/Sao_Paulo")
 				t := evStartDate.Time.In(loc)
 				meses := []string{"", "Jan", "Fev", "Mar", "Abr", "Mai", "Jun", "Jul", "Ago", "Set", "Out", "Nov", "Dez"}
 				data = formatEventDate(t, meses)
 				hora = formatEventTime(t)
+				startDateISO = evStartDate.Time.UTC().Format(time.RFC3339)
 			}
 
-			// Mapeia status do banco para o que o frontend espera
+			// Determina status para o frontend:
+			// 1. cancelled → sempre encerrado
+			// 2. end_date preenchido e já passou → encerrado
+			// 3. sem end_date mas start_date já passou → encerrado
+			// 4. caso contrário → normal
 			frontendStatus := "normal"
-			if evStatus == "finished" || evStatus == "cancelled" {
+			if evStatus == "cancelled" {
+				frontendStatus = "encerrado"
+			} else if evEndDate.Valid && evEndDate.Time.Before(now) {
+				frontendStatus = "encerrado"
+			} else if !evEndDate.Valid && evStartDate.Valid && evStartDate.Time.Before(now) {
 				frontendStatus = "encerrado"
 			}
 
 			events = append(events, OrgEvent{
-				ID:       evID,
-				Slug:     evSlug,
-				Nome:     evTitle,
-				Data:     data,
-				Hora:     hora,
-				Local:    evVenue,
-				ImageURL: evImageURL,
-				Status:   frontendStatus,
+				ID:        evID,
+				Slug:      evSlug,
+				Nome:      evTitle,
+				Data:      data,
+				Hora:      hora,
+				Local:     evVenue,
+				ImageURL:  evImageURL,
+				Status:    frontendStatus,
+				StartDate: startDateISO,
 			})
 		}
 	}
@@ -236,7 +251,6 @@ func FollowOrganizer(c *gin.Context) {
 
 	db := config.GetDB()
 
-	// Resolve org ID a partir do slug
 	var orgID string
 	if err := db.QueryRow(`SELECT id FROM organizations WHERE slug = $1`, orgSlug).Scan(&orgID); err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Organização não encontrada"})

@@ -54,9 +54,16 @@ func UpdateProfileHandler(c *gin.Context) {
 		return
 	}
 
+	// Sanitiza o CPF removendo pontuação antes de salvar
+	cpf := sanitizeCPF(body.CPF)
+	if len(cpf) != 11 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "CPF inválido"})
+		return
+	}
+
 	_, err := config.GetDB().ExecContext(context.Background(),
 		`UPDATE users SET cpf = $1, updated_at = now() WHERE id = $2`,
-		body.CPF, uid,
+		cpf, uid,
 	)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao atualizar perfil: " + err.Error()})
@@ -64,4 +71,15 @@ func UpdateProfileHandler(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "perfil atualizado"})
+}
+
+// sanitizeCPF remove pontos e traços, retornando apenas os 11 dígitos.
+func sanitizeCPF(cpf string) string {
+	result := make([]byte, 0, 11)
+	for i := 0; i < len(cpf); i++ {
+		if cpf[i] >= '0' && cpf[i] <= '9' {
+			result = append(result, cpf[i])
+		}
+	}
+	return string(result)
 }

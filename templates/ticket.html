@@ -7,40 +7,43 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@700;800&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
-  <!-- QR Code gerado no cliente via lib leve -->
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
+    html, body {
+      width: 100%;
+      height: 100%;
+    }
+
     body {
-      background: #F7F7F2;
+      background: #0A0A0A;
       font-family: 'Plus Jakarta Sans', sans-serif;
       display: flex;
-      justify-content: center;
-      align-items: flex-start;
+      flex-direction: column;
       min-height: 100vh;
-      padding: 40px 16px 60px;
       -webkit-print-color-adjust: exact;
       print-color-adjust: exact;
     }
 
-    /* ── Card ── */
+    /* ── Card ocupa tudo ── */
     .ticket {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
       width: 100%;
-      max-width: 420px;
+      min-height: 100vh;
       background: #0A0A0A;
-      border-radius: 28px;
       overflow: hidden;
-      box-shadow: 0 24px 64px rgba(0,0,0,0.22);
     }
 
     /* ── Banner ── */
     .ticket__banner {
       position: relative;
       width: 100%;
-      height: 200px;
+      height: 260px;
       background: #111;
       overflow: hidden;
+      flex-shrink: 0;
     }
     .ticket__banner img {
       width: 100%;
@@ -51,46 +54,48 @@
     .ticket__banner-overlay {
       position: absolute;
       inset: 0;
-      background: linear-gradient(to bottom, transparent 30%, #0A0A0A 100%);
+      background: linear-gradient(to bottom, transparent 20%, #0A0A0A 100%);
     }
-    /* Logo reppy no canto */
     .ticket__brand {
       position: absolute;
-      top: 16px;
-      left: 20px;
-      font-family: 'Bricolage Grotesque', sans-serif;
-      font-weight: 800;
-      font-size: 22px;
-      color: #1BFF11;
-      letter-spacing: -0.5px;
+      top: 20px;
+      left: 24px;
+    }
+    .ticket__brand img {
+      height: 28px;
+      width: auto;
+      display: block;
     }
 
     /* ── Body ── */
     .ticket__body {
-      padding: 0 24px 0;
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      padding: 0 28px;
     }
 
     .ticket__event-name {
       font-family: 'Bricolage Grotesque', sans-serif;
       font-weight: 800;
-      font-size: 26px;
+      font-size: 48px;
       color: #FFFFFF;
-      letter-spacing: -0.8px;
-      line-height: 1.1;
-      margin-bottom: 16px;
+      letter-spacing: -2px;
+      line-height: 1.0;
+      margin-bottom: 24px;
     }
 
     .ticket__meta {
       display: flex;
       flex-direction: column;
-      gap: 8px;
+      gap: 10px;
       margin-bottom: 24px;
     }
     .ticket__meta-row {
       display: flex;
       align-items: center;
       gap: 8px;
-      font-size: 13px;
+      font-size: 14px;
       color: #9A9A8F;
     }
     .ticket__meta-row strong {
@@ -105,6 +110,39 @@
       flex-shrink: 0;
     }
 
+    /* ── Endereço completo ── */
+    .ticket__address {
+      background: #111;
+      border: 1px solid #1e1e1e;
+      border-radius: 16px;
+      padding: 16px 18px;
+      margin-bottom: 24px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .ticket__address-label {
+      font-size: 10px;
+      font-weight: 700;
+      color: #5C5C52;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      margin-bottom: 6px;
+    }
+    .ticket__address-venue {
+      font-size: 15px;
+      font-weight: 700;
+      color: #F7F7F2;
+    }
+    .ticket__address-street {
+      font-size: 13px;
+      color: #9A9A8F;
+    }
+    .ticket__address-city {
+      font-size: 13px;
+      color: #9A9A8F;
+    }
+
     /* ── Lote badge ── */
     .ticket__batch {
       display: inline-flex;
@@ -112,13 +150,19 @@
       background: #1a1a1a;
       border: 1px solid #2a2a2a;
       border-radius: 100px;
-      padding: 4px 12px;
+      padding: 5px 14px;
       font-size: 11px;
       font-weight: 700;
       color: #9A9A8F;
       letter-spacing: 0.08em;
       text-transform: uppercase;
       margin-bottom: 24px;
+      align-self: flex-start;
+    }
+
+    /* ── Spacer empurra QR pra baixo ── */
+    .ticket__spacer {
+      flex: 1;
     }
 
     /* ── Divider pontilhado ── */
@@ -126,16 +170,19 @@
       position: relative;
       display: flex;
       align-items: center;
-      margin: 0 -24px 24px;
+      margin: 0 -28px 28px;
     }
     .ticket__divider::before,
     .ticket__divider::after {
       content: '';
-      width: 20px;
-      height: 20px;
+      width: 22px;
+      height: 22px;
       border-radius: 50%;
-      background: #F7F7F2;
+      background: #0A0A0A;
+      border: 1.5px solid #1e1e1e;
       flex-shrink: 0;
+      margin: 0 -11px;
+      z-index: 1;
     }
     .ticket__divider-line {
       flex: 1;
@@ -147,29 +194,26 @@
       display: flex;
       flex-direction: column;
       align-items: center;
-      gap: 12px;
-      padding-bottom: 28px;
+      gap: 14px;
+      padding-bottom: 32px;
     }
     .ticket__qr-wrap {
       background: #FFFFFF;
-      border-radius: 16px;
-      padding: 12px;
-      width: 160px;
-      height: 160px;
+      border-radius: 24px;
+      padding: 16px;
+      width: 240px;
+      height: 240px;
       display: flex;
       align-items: center;
       justify-content: center;
     }
-    /* o canvas/img gerado pelo qrcodejs */
-    .ticket__qr-wrap canvas,
     .ticket__qr-wrap img { display: block; }
 
     .ticket__qr-code {
-      font-family: 'Plus Jakarta Sans', sans-serif;
-      font-size: 13px;
+      font-size: 12px;
       font-weight: 700;
       color: #5C5C52;
-      letter-spacing: 0.14em;
+      letter-spacing: 0.16em;
       text-transform: uppercase;
     }
 
@@ -177,10 +221,11 @@
     .ticket__footer {
       background: #111;
       border-top: 1px solid #1e1e1e;
-      padding: 14px 24px;
+      padding: 16px 28px;
       display: flex;
       align-items: center;
       justify-content: space-between;
+      flex-shrink: 0;
     }
     .ticket__footer-label {
       font-size: 10px;
@@ -188,6 +233,7 @@
       color: #5C5C52;
       letter-spacing: 0.12em;
       text-transform: uppercase;
+      margin-bottom: 3px;
     }
     .ticket__footer-value {
       font-size: 12px;
@@ -195,7 +241,7 @@
       color: #9A9A8F;
     }
 
-    /* ── Status badge sobreposto (se encerrado/usado) ── */
+    /* ── Status badge ── */
     .ticket__status-badge {
       display: inline-flex;
       align-items: center;
@@ -210,13 +256,18 @@
       letter-spacing: 0.08em;
       text-transform: uppercase;
       margin-bottom: 16px;
+      align-self: flex-start;
     }
     .ticket__status-badge--usado { color: #1BFF11; border-color: rgba(27,255,17,0.25); }
 
-    /* Print */
+    /* Print — garante retrato sem margens */
+    @page {
+      size: A4 portrait;
+      margin: 0;
+    }
     @media print {
-      body { background: white; padding: 0; }
-      .ticket { box-shadow: none; max-width: 100%; }
+      html, body { height: 100%; }
+      .ticket { min-height: 100vh; }
     }
   </style>
 </head>
@@ -230,24 +281,21 @@
       <img src="{{.Evento.ImageURL}}" alt="{{.Evento.Nome}}" />
     {{end}}
     <div class="ticket__banner-overlay"></div>
-    <span class="ticket__brand">reppy</span>
+    <span class="ticket__brand">
+      <img src="https://waxdhvdawhcpdjyxjqkh.supabase.co/storage/v1/object/public/reppy-media/logo_branca.png" alt="reppy" />
+    </span>
   </div>
 
   <!-- Body -->
   <div class="ticket__body">
 
-    <!-- Status badge (só aparece se não for ativo) -->
-    {{if eq .Status "usado"}}
-      <div style="padding-top:20px;">
+    <div style="padding-top:24px;">
+      {{if eq .Status "usado"}}
         <span class="ticket__status-badge ticket__status-badge--usado">✓ Utilizado</span>
-      </div>
-    {{else if eq .Status "encerrado"}}
-      <div style="padding-top:20px;">
+      {{else if eq .Status "encerrado"}}
         <span class="ticket__status-badge">Encerrado</span>
-      </div>
-    {{else}}
-      <div style="padding-top:20px;"></div>
-    {{end}}
+      {{end}}
+    </div>
 
     <h1 class="ticket__event-name">{{.Evento.Nome}}</h1>
 
@@ -259,16 +307,27 @@
           <span>{{.Evento.Hora}}</span>
         {{end}}
       </div>
-      {{if .Evento.Local}}
-        <div class="ticket__meta-row">
-          <span>{{.Evento.Local}}</span>
-        </div>
+    </div>
+
+    {{if .Evento.VenueName}}
+    <div class="ticket__address">
+      <div class="ticket__address-label">Local</div>
+      <div class="ticket__address-venue">{{.Evento.VenueName}}</div>
+      {{if .Evento.Street}}
+        <div class="ticket__address-street">{{.Evento.Street}}{{if .Evento.Number}}, {{.Evento.Number}}{{end}}{{if .Evento.Neighborhood}} — {{.Evento.Neighborhood}}{{end}}</div>
+      {{end}}
+      {{if .Evento.City}}
+        <div class="ticket__address-city">{{.Evento.City}}{{if .Evento.State}} — {{.Evento.State}}{{end}}{{if .Evento.CEP}}, CEP {{.Evento.CEP}}{{end}}</div>
       {{end}}
     </div>
+    {{end}}
 
     {{if .LoteName}}
       <div class="ticket__batch">{{.LoteName}}</div>
     {{end}}
+
+    <!-- Empurra QR Code para baixo -->
+    <div class="ticket__spacer"></div>
 
     <!-- Divider -->
     <div class="ticket__divider">
@@ -276,12 +335,12 @@
     </div>
 
     <!-- QR Code -->
-  <div class="ticket__qr-section">
-    <div class="ticket__qr-wrap">
-        <img src="data:image/png;base64,{{.QRBase64}}" width="136" height="136" />
+    <div class="ticket__qr-section">
+      <div class="ticket__qr-wrap">
+        <img src="data:image/png;base64,{{.QRBase64}}" width="208" height="208" />
+      </div>
+      <span class="ticket__qr-code">{{.QRCode}}</span>
     </div>
-    <span class="ticket__qr-code">{{.QRCode}}</span>
-</div>
 
   </div>
 
@@ -298,17 +357,6 @@
   </div>
 
 </div>
-
-<script>
-  new QRCode(document.getElementById("qrcode"), {
-    text: "{{.QRCode}}",
-    width: 136,
-    height: 136,
-    colorDark: "#0A0A0A",
-    colorLight: "#FFFFFF",
-    correctLevel: QRCode.CorrectLevel.H,
-  });
-</script>
 
 </body>
 </html>

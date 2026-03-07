@@ -31,23 +31,39 @@ type SectionResponse struct {
 	Events []EventCard `json:"events"`
 }
 
+// Location representa o JSONB da coluna `location` na tabela events.
 type Location struct {
-	VenueName string `json:"venue_name"`
-	City      string `json:"city"`
-	State     string `json:"state"`
+	VenueName    string `json:"venue_name"`
+	Street       string `json:"street"`
+	Number       string `json:"number"`
+	Neighborhood string `json:"neighborhood"`
+	City         string `json:"city"`
+	State        string `json:"state"`
+	CEP          string `json:"cep"`
+	Complement   string `json:"complement"`
 }
+
+// activeFilter é a condição SQL reutilizada em todas as queries:
+// evento publicado cujo end_date ainda não passou.
+// Fallback: se end_date for NULL, usa start_date.
+const activeFilter = `
+  status = 'published'
+  AND (
+    (end_date IS NOT NULL AND end_date > NOW())
+    OR (end_date IS NULL AND start_date > NOW())
+  )`
 
 func GetHomeEvents(c *gin.Context) {
 	db := config.GetDB()
 	var seenIDs []string
 
 	// ── 1. EM DESTAQUE ────────────────────────────────────────────────────
-	destaqueEvents, err := fetchEvents(db, `
+	destaqueEvents, err := fetchEvents(db, fmt.Sprintf(`
 		SELECT id, title, slug, image_url, start_date, category, location
 		FROM events
-		WHERE status = 'published' AND start_date > NOW()
+		WHERE %s
 		ORDER BY views DESC
-		LIMIT 5`)
+		LIMIT 5`, activeFilter))
 	if err != nil {
 		log.Printf("GetHomeEvents destaque: %v", err)
 		destaqueEvents = []EventCard{}
@@ -75,12 +91,11 @@ func GetHomeEvents(c *gin.Context) {
 				}
 			}
 
-			placeholder, args := buildExcludePlaceholders(seenIDs, 4) // $1=lng $2=lat $3=radius $4+
+			placeholder, args := buildExcludePlaceholders(seenIDs, 4)
 			query := fmt.Sprintf(`
 				SELECT id, title, slug, image_url, start_date, category, location
 				FROM events
-				WHERE status = 'published'
-				  AND start_date > NOW()
+				WHERE %s
 				  AND geolocation IS NOT NULL
 				  %s
 				  AND ST_DWithin(
@@ -89,7 +104,7 @@ func GetHomeEvents(c *gin.Context) {
 				        $3
 				      )
 				ORDER BY geolocation <-> ST_SetSRID(ST_MakePoint($1, $2), 4326)::geography
-				LIMIT 5`, placeholder)
+				LIMIT 5`, activeFilter, placeholder)
 
 			queryArgs := append([]interface{}{lng, lat, maxRadiusKm * 1000}, args...)
 			pertoEvents, err = fetchEvents(db, query, queryArgs...)
@@ -100,17 +115,15 @@ func GetHomeEvents(c *gin.Context) {
 		}
 	}
 
-	// Sem coordenadas (ou parse falhou): próximos eventos por data
 	if !hasCoords {
 		placeholder, args := buildExcludePlaceholders(seenIDs, 1)
 		query := fmt.Sprintf(`
 			SELECT id, title, slug, image_url, start_date, category, location
 			FROM events
-			WHERE status = 'published'
-			  AND start_date > NOW()
+			WHERE %s
 			  %s
 			ORDER BY start_date ASC
-			LIMIT 5`, placeholder)
+			LIMIT 5`, activeFilter, placeholder)
 
 		pertoEvents, err = fetchEvents(db, query, args...)
 		if err != nil {
@@ -126,11 +139,11 @@ func GetHomeEvents(c *gin.Context) {
 	query := fmt.Sprintf(`
 		SELECT id, title, slug, image_url, start_date, category, location
 		FROM events
-		WHERE status = 'published'
+		WHERE %s
 		  AND start_date BETWEEN NOW() AND NOW() + INTERVAL '14 days'
 		  %s
 		ORDER BY start_date ASC
-		LIMIT 5`, placeholder)
+		LIMIT 5`, activeFilter, placeholder)
 
 	proximaEvents, err := fetchEvents(db, query, args...)
 	if err != nil {
@@ -142,7 +155,7 @@ func GetHomeEvents(c *gin.Context) {
 	sections := []SectionResponse{
 		{ID: "destaque", Label: "em destaque", Events: destaqueEvents},
 		{
-			ID:    "perto",
+			ID: "perto",
 			Label: func() string {
 				if hasCoords {
 					return "perto de você"
@@ -167,9 +180,6 @@ func extractIDs(events []EventCard) []string {
 	return ids
 }
 
-// buildExcludePlaceholders gera "AND id NOT IN ($startIdx, $startIdx+1, ...)"
-// usando parâmetros posicionais para evitar SQL injection.
-// Retorna a cláusula SQL e o slice de args correspondente.
 func buildExcludePlaceholders(ids []string, startIdx int) (string, []interface{}) {
 	if len(ids) == 0 {
 		return "", nil
