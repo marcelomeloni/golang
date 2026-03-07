@@ -10,14 +10,19 @@ type CreateOrderRequest struct {
 	EventID    string         `json:"eventId"    binding:"required"`
 	CouponCode string         `json:"couponCode"`
 	Items      []CheckoutItem `json:"items"      binding:"required,min=1"`
+	BuyerName  string         `json:"buyerName"`
+	BuyerEmail string         `json:"buyerEmail"`
+	BuyerCPF   string         `json:"buyerCPF"`
 }
 
 type CreateOrderResponse struct {
-	OrderID       string  `json:"orderId"`
-	PaymentMethod string  `json:"paymentMethod"`
-	TotalAmount   float64 `json:"totalAmount"`
-	PixCode       string  `json:"pixCode,omitempty"`
-	PixQrCode     string  `json:"pixQrCode,omitempty"`
+	OrderID           string  `json:"orderId"`
+	PaymentMethod     string  `json:"paymentMethod"`
+	TotalAmount       float64 `json:"totalAmount"`
+	PixCode           string  `json:"pixCode,omitempty"`
+	PixQrCode         string  `json:"pixQrCode,omitempty"`
+	IsGuest           bool    `json:"isGuest,omitempty"`
+	ConfirmationEmail string  `json:"confirmationEmail,omitempty"`
 }
 
 type ValidateCouponRequest struct {

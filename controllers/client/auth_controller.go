@@ -1,4 +1,3 @@
-// controllers/client/auth_controller.go
 package client
 
 import (
@@ -23,9 +22,9 @@ type CheckProfileResponse struct {
 	FullName   string `json:"fullName"`
 	AvatarURL  string `json:"avatarUrl"`
 	Email      string `json:"email"`
-	Phone      string `json:"phone"`      // <-- CAMPO ADICIONADO
-	CPF        string `json:"cpf"`        // já formatado: 000.000.000-00 (vazio se não tiver)
-	BirthDate  string `json:"birthDate"`  // YYYY-MM-DD (vazio se não tiver)
+	Phone      string `json:"phone"`
+	CPF        string `json:"cpf"`       // já formatado: 000.000.000-00 (vazio se não tiver)
+	BirthDate  string `json:"birthDate"` // YYYY-MM-DD (vazio se não tiver)
 }
 
 type CompleteProfileRequest struct {
@@ -51,7 +50,6 @@ func cleanCPF(raw string) (string, bool) {
 	return digits, true
 }
 
-// formatCPF formata 11 dígitos → 000.000.000-00
 func formatCPF(digits string) string {
 	if len(digits) != 11 {
 		return digits
@@ -69,7 +67,6 @@ func cleanPhone(raw string) string {
 // ==========================================
 
 // CheckProfile — retorna dados existentes do usuário incluindo CPF e data de nascimento
-// para pré-preencher o formulário de completar registro.
 func CheckProfile(c *gin.Context) {
 	userID := c.Param("userId")
 	if userID == "" {
@@ -85,7 +82,7 @@ func CheckProfile(c *gin.Context) {
 		fullName  sql.NullString
 		avatarURL sql.NullString
 		email     sql.NullString
-		phone     sql.NullString // Variável já adicionada
+		phone     sql.NullString
 	)
 
 	err := db.QueryRow(`
@@ -103,22 +100,17 @@ func CheckProfile(c *gin.Context) {
 		return
 	}
 
-	// === AQUI ESTÁ A MUDANÇA PRINCIPAL ===
 	hasCPF := cpf.Valid && strings.TrimSpace(cpf.String) != ""
 	hasBirthDate := birthDate.Valid
-	hasPhone := phone.Valid && strings.TrimSpace(phone.String) != "" // Verifica se o telefone existe
+	hasPhone := phone.Valid && strings.TrimSpace(phone.String) != ""
 
-	// Agora o perfil só é considerado completo se tiver os 3 campos
-	hasProfile := hasCPF && hasBirthDate && hasPhone 
-	// =====================================
+	hasProfile := hasCPF && hasBirthDate && hasPhone
 
-	// Formata CPF para exibição no frontend (000.000.000-00)
 	cpfFormatted := ""
 	if hasCPF {
 		cpfFormatted = formatCPF(strings.TrimSpace(cpf.String))
 	}
 
-	// Formata data para YYYY-MM-DD
 	birthDateStr := ""
 	if hasBirthDate {
 		birthDateStr = birthDate.Time.Format("2006-01-02")
@@ -130,12 +122,13 @@ func CheckProfile(c *gin.Context) {
 		FullName:   fullName.String,
 		AvatarURL:  avatarURL.String,
 		Email:      email.String,
-		Phone:      phone.String, 
+		Phone:      phone.String,
 		CPF:        cpfFormatted,
 		BirthDate:  birthDateStr,
 	})
 }
 
+// CompleteProfile — salva ou atualiza CPF, data de nascimento e dados extras.
 // CompleteProfile — salva ou atualiza CPF, data de nascimento e dados extras.
 func CompleteProfile(c *gin.Context) {
 	var req CompleteProfileRequest
@@ -163,30 +156,51 @@ func CompleteProfile(c *gin.Context) {
 	}
 
 	phoneClean := cleanPhone(req.Phone)
-	username   := strings.TrimSpace(strings.TrimPrefix(req.Username, "@"))
-	instagram  := strings.TrimSpace(strings.TrimPrefix(req.Instagram, "@"))
+	username := strings.TrimSpace(strings.TrimPrefix(req.Username, "@"))
+	instagram := strings.TrimSpace(strings.TrimPrefix(req.Instagram, "@"))
 
 	db := config.GetDB()
-
-	// CPF duplicado em outra conta?
 	var existingID string
+
+	// 1. Verifica CPF duplicado em outra conta
 	err = db.QueryRow(
 		`SELECT id FROM users WHERE cpf = $1 AND id != $2`,
 		cpfClean, req.UserID,
 	).Scan(&existingID)
 	if err == nil {
-		c.JSON(http.StatusConflict, gin.H{"error": "Este CPF já está cadastrado em outra conta."})
+		c.JSON(http.StatusConflict, gin.H{
+			"error": "Este CPF já está cadastrado em outra conta.",
+			"code":  "cpf_conflict", // Adicionado para o React ler
+		})
 		return
 	}
 
-	// Username duplicado?
+	// 2. Verifica Telefone duplicado em outra conta (NOVO)
+	if phoneClean != "" {
+		err = db.QueryRow(
+			`SELECT id FROM users WHERE phone = $1 AND id != $2`,
+			phoneClean, req.UserID,
+		).Scan(&existingID)
+		if err == nil {
+			c.JSON(http.StatusConflict, gin.H{
+				"error": "Este telefone já está cadastrado em outra conta.",
+				"code":  "phone_conflict", // Adicionado para o React ler
+			})
+			return
+		}
+	}
+
+	// 3. Verifica Username duplicado
 	if username != "" {
 		err = db.QueryRow(
 			`SELECT id FROM users WHERE username = $1 AND id != $2`,
 			username, req.UserID,
 		).Scan(&existingID)
 		if err == nil {
-			c.JSON(http.StatusConflict, gin.H{"error": "Este nome de usuário já está em uso."})
+			c.JSON(http.StatusConflict, gin.H{
+				"error": "Este nome de usuário já está em uso.",
+				"code":  "username_conflict",
+			})
 			return
 		}
 	}

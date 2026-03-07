@@ -21,15 +21,15 @@ func Register(r *gin.Engine) {
 		// Eventos
 		clientGroup.GET("/home-events",  client.GetHomeEvents)
 		clientGroup.GET("/events/:slug", client.GetEventDetail)
+		clientGroup.GET("/search",       client.Search)
 
-		// Organizadores
-		clientGroup.GET("/organizers/:slug",           client.GetOrganizerDetail)
-		clientGroup.POST("/organizers/:slug/follow",   client.FollowOrganizer)
-		clientGroup.DELETE("/organizers/:slug/follow", client.UnfollowOrganizer)
+		// Organizadores (OptionalAuth para saber se o usuário logado já segue)
+		clientGroup.GET("/organizers/:slug", middleware.OptionalAuth(), client.GetOrganizerDetail)
 
-		// Checkout — sem auth (suporta guests)
-		clientGroup.POST("/checkout/coupon", middleware.OptionalAuth(), client.ValidateCoupon)
-		clientGroup.POST("/checkout/orders", middleware.OptionalAuth(), client.CreateOrder)
+		// Checkout — sem auth obrigatória (suporta guests)
+		clientGroup.POST("/checkout/coupon",                       middleware.OptionalAuth(), client.ValidateCoupon)
+		clientGroup.POST("/checkout/orders",                       middleware.OptionalAuth(), client.CreateOrder)
+		clientGroup.GET("/checkout/orders/:orderID/pix/status",   middleware.OptionalAuth(), client.CheckPixStatus)
 
 		// Rotas autenticadas — JWT obrigatório
 		authed := clientGroup.Group("/", middleware.AuthMiddleware())
@@ -37,6 +37,10 @@ func Register(r *gin.Engine) {
 			// Meus ingressos
 			authed.GET("/my-tickets",              client.GetMyTickets)
 			authed.GET("/my-tickets/:id/download", client.DownloadTicket)
+
+			// Organizadores - Seguir/Deixar de Seguir
+			authed.POST("/organizers/:slug/follow",   client.FollowOrganizer)
+			authed.DELETE("/organizers/:slug/follow", client.UnfollowOrganizer)
 
 			// Ações sobre ingresso
 			authed.POST("/tickets/:id/transfer", client.TransferTicket)
@@ -48,13 +52,13 @@ func Register(r *gin.Engine) {
 			authed.DELETE("/market/listings/:listingId", client.DeleteMarketListing)
 
 			// Reppy Radar — prefixo /radar/events para evitar conflito com /events/:slug
-			authed.GET("/radar/events/:eventId",                        client.GetRadarProfiles)
-			authed.GET("/radar/events/:eventId/mode",                   client.GetRadarMode)
-			authed.PATCH("/radar/events/:eventId/mode",                 client.ToggleRadarMode)
-			authed.POST("/radar/events/:eventId/tap/:targetUserId",     client.TapUser)
-			authed.DELETE("/radar/events/:eventId/tap/:targetUserId",   client.RemoveTap)
-			authed.POST("/radar/block/:targetUserId",                   client.BlockRadarUser)
-			authed.DELETE("/radar/block/:targetUserId",                 client.UnblockRadarUser)
+			authed.GET("/radar/events/:eventId",                      client.GetRadarProfiles)
+			authed.GET("/radar/events/:eventId/mode",                 client.GetRadarMode)
+			authed.PATCH("/radar/events/:eventId/mode",               client.ToggleRadarMode)
+			authed.POST("/radar/events/:eventId/tap/:targetUserId",   client.TapUser)
+			authed.DELETE("/radar/events/:eventId/tap/:targetUserId", client.RemoveTap)
+			authed.POST("/radar/block/:targetUserId",                 client.BlockRadarUser)
+			authed.DELETE("/radar/block/:targetUserId",               client.UnblockRadarUser)
 		}
 	}
 }

@@ -1,4 +1,3 @@
-// main.go
 package main
 
 import (
@@ -7,9 +6,11 @@ import (
 
 	"bilheteria-api/config"
 	"bilheteria-api/middleware"
-	
-	clientRoutes "bilheteria-api/routes/client"       // 👈 NOVO IMPORT
+	"bilheteria-api/services/paymentservice"
+
+	clientRoutes   "bilheteria-api/routes/client"
 	organizerRoutes "bilheteria-api/routes/organizer"
+	webhookRoutes "bilheteria-api/routes/webhooks"
 
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
@@ -23,9 +24,16 @@ func main() {
 	config.InitDB()
 	middleware.InitJWKS()
 
+	// ── Gateways de pagamento ─────────────────────────────────────────────────
+	apiKey := os.Getenv("ABACATEPAY_API_KEY")
+	if apiKey == "" {
+		log.Fatal("❌ ABACATEPAY_API_KEY não definida")
+	}
+	paymentservice.Default = paymentservice.NewAbacatePay(apiKey)
+
 	r := gin.Default()
 
-	// ── CORS ─────────────────────────────────────────────────────────────────
+	// ── CORS ──────────────────────────────────────────────────────────────────
 	r.Use(func(c *gin.Context) {
 		origin := c.Request.Header.Get("Origin")
 		if origin == "" {
@@ -45,9 +53,9 @@ func main() {
 	})
 	// ─────────────────────────────────────────────────────────────────────────
 
-	// Registra as rotas das duas "frentes" da sua aplicação
 	organizerRoutes.Register(r)
-	clientRoutes.Register(r) // 👈 NOVA LINHA AQUI
+	clientRoutes.Register(r)
+	webhookRoutes.Register(r)
 
 	port := os.Getenv("PORT")
 	if port == "" {

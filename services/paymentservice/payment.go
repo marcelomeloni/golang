@@ -1,33 +1,21 @@
 package paymentservice
 
-import "fmt"
-
 // Result é retornado pelo gateway após criação da cobrança.
 type Result struct {
-	PixCode    string
-	PixQrCode  string
-	ExternalID string // ID da cobrança no gateway
+	PixCode    string // código copia-e-cola (brCode)
+	PixQrCode  string // imagem base64 do QRCode
+	ExternalID string // ID da cobrança no AbacatePay (ex: "pix_char_123456")
 }
 
 // Gateway é a interface que qualquer provedor de pagamento deve implementar.
 type Gateway interface {
-	GeneratePix(orderID string, amountBRL float64) (Result, error)
+	// GeneratePix cria uma cobrança Pix. Os campos buyer* são opcionais:
+	// quando presentes e completos, são enviados como customer ao gateway.
+	GeneratePix(orderID string, amountBRL float64, buyerName, buyerEmail, buyerCPF, buyerPhone string) (Result, error)
+	CheckStatus(externalID string) (string, error)
 }
 
-// ──────────────────────────────────────────────
-// Stub — substituir por implementação real
-// ──────────────────────────────────────────────
-// Exemplo de uso quando integrar (ex: Asaas):
+// Default é o gateway ativo. Inicialize em main.go com:
 //
-//   gateway := asaasgateway.New(os.Getenv("ASAAS_API_KEY"))
-//   result, err := gateway.GeneratePix(orderID, grandTotal)
-
-type stubGateway struct{}
-
-func (s stubGateway) GeneratePix(orderID string, amountBRL float64) (Result, error) {
-	// TODO: integrar com Mercado Pago / Asaas / PagSeguro
-	return Result{}, fmt.Errorf("pagamento não implementado")
-}
-
-// Default é o gateway ativo. Troque por uma implementação real em main.go ou config.
-var Default Gateway = stubGateway{}
+//	paymentservice.Default = paymentservice.NewAbacatePay(os.Getenv("ABACATEPAY_API_KEY"))
+var Default Gateway

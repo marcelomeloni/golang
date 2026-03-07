@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"bilheteria-api/config"
+	"bilheteria-api/services/feehelper"
 	"github.com/gin-gonic/gin"
 )
 
@@ -25,6 +26,7 @@ type EventDetailResponse struct {
 
 type EventData struct {
 	ID           string        `json:"id"`
+	Slug         string        `json:"slug"`
 	Title        string        `json:"title"`
 	Description  string        `json:"description"`
 	ImageURL     string        `json:"image_url"`
@@ -68,8 +70,9 @@ type OfficialLot struct {
 	Subtitle          string  `json:"subtitle"`
 	Price             float64 `json:"price"`
 	FeePayer          string  `json:"feePayer"`
+	FeePercentage     float64 `json:"feePercentage"` // taxa específica deste lote (ex: 0.07)
 	Available         bool    `json:"available"`
-	UnavailableReason string  `json:"unavailableReason,omitempty"` // "sold_out" | "expired" | "not_started"
+	UnavailableReason string  `json:"unavailableReason,omitempty"`
 }
 
 type MarketLot struct {
@@ -93,13 +96,12 @@ type DBLocation struct {
 }
 
 type DBRequirements struct {
-	MinAge        string   `json:"min_age"`
-	RequiredDocs  []string `json:"required_docs"`
-	AcceptedTerms bool     `json:"accepted_terms"`
-	// campos legados
-	AgeRestriction string `json:"age_restriction"`
-	Documents      string `json:"documents"`
-	RefundPolicy   string `json:"refund_policy"`
+	MinAge         string   `json:"min_age"`
+	RequiredDocs   []string `json:"required_docs"`
+	AcceptedTerms  bool     `json:"accepted_terms"`
+	AgeRestriction string   `json:"age_restriction"`
+	Documents      string   `json:"documents"`
+	RefundPolicy   string   `json:"refund_policy"`
 }
 
 // ==========================================
@@ -123,7 +125,8 @@ func GetEventDetail(c *gin.Context) {
 			UPDATE events
 			SET views = views + 1
 			WHERE slug = $1 AND status = 'published'
-			RETURNING id, title, description, image_url, start_date, location, requirements, organization_id, instagram
+			RETURNING id, title, description, image_url, start_date, location, requirements,
+			          organization_id, instagram, promo_fee
 		)
 		SELECT
 			u.id,
@@ -134,11 +137,10 @@ func GetEventDetail(c *gin.Context) {
 			u.location,
 			u.requirements,
 			u.instagram,
+			u.promo_fee,
 			COALESCE(o.name, ''),
 			COALESCE(o.slug, ''),
-			COALESCE(o.logo_url, ''),
-			COALESCE(o.platform_fee_percentage, 0),
-			COALESCE(o.platform_fee_fixed, 0)
+			COALESCE(o.logo_url, '')
 		FROM updated u
 		LEFT JOIN organizations o ON u.organization_id = o.id;
 	`
@@ -149,16 +151,16 @@ func GetEventDetail(c *gin.Context) {
 		startDate                      sql.NullTime
 		locationJSON, requirementsJSON []byte
 		instagram                      sql.NullString
+		promoFee                       bool
 		orgName, orgSlug, orgLogoURL   string
-		orgFeePercent, orgFeeFixed     float64
 	)
 
 	err := db.QueryRow(queryEvent, slug).Scan(
 		&id, &title, &description, &imageURL, &startDate,
 		&locationJSON, &requirementsJSON,
 		&instagram,
+		&promoFee,
 		&orgName, &orgSlug, &orgLogoURL,
-		&orgFeePercent, &orgFeeFixed,
 	)
 
 	if err == sql.ErrNoRows {
@@ -215,6 +217,7 @@ func GetEventDetail(c *gin.Context) {
 
 	eventData := EventData{
 		ID:           id,
+		Slug:         slug,
 		Title:        title,
 		Description:  description.String,
 		ImageURL:     imageURL.String,
@@ -233,10 +236,8 @@ func GetEventDetail(c *gin.Context) {
 			RequiredDocs: requiredDocs,
 			RefundPolicy: refundPolicy,
 		},
-		PlatformFee: PlatformFee{
-			Percentage: orgFeePercent,
-			Fixed:      orgFeeFixed,
-		},
+		// PlatformFee no nível do evento fica zerado — a taxa real está em cada OfficialLot.feePercentage
+		PlatformFee: PlatformFee{Percentage: 0, Fixed: 0},
 		Organizer: OrganizerData{
 			Name:    orgName,
 			Slug:    orgSlug,
@@ -245,7 +246,7 @@ func GetEventDetail(c *gin.Context) {
 	}
 
 	// ------------------------------------------------------------------
-	// 2. LOTES OFICIAIS — retorna todos, com flag de disponibilidade
+	// 2. LOTES OFICIAIS — feePercentage calculado por lote via feehelper
 	// ------------------------------------------------------------------
 	queryOfficial := `
 		SELECT
@@ -282,6 +283,10 @@ func GetEventDetail(c *gin.Context) {
 			); err != nil {
 				log.Printf("GetEventDetail scan lot: %v", err)
 				continue
+			}
+			// Calcula a taxa correta para este lote específico
+			if l.FeePayer == "buyer" && l.Price > 0 {
+				l.FeePercentage = feehelper.CalcFee(l.Price, promoFee).FeePercentage
 			}
 			officialLots = append(officialLots, l)
 		}

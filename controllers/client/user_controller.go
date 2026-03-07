@@ -126,11 +126,27 @@ func UpdateUserProfile(c *gin.Context) {
 		return
 	}
 
-	phone := cleanPhone(req.Phone)
+	phone     := cleanPhone(req.Phone)
 	instagram := strings.TrimSpace(strings.TrimPrefix(req.Instagram, "@"))
-	fullName := strings.TrimSpace(req.FullName)
+	fullName  := strings.TrimSpace(req.FullName)
 
 	db := config.GetDB()
+
+	// Telefone duplicado em outra conta?
+	if phone != "" {
+		var existingID string
+		err := db.QueryRow(
+			`SELECT id FROM users WHERE phone = $1 AND id != $2`,
+			phone, userID,
+		).Scan(&existingID)
+		if err == nil {
+			c.JSON(http.StatusConflict, gin.H{
+				"error": "Este telefone já está cadastrado em outra conta.",
+				"code":  "phone_conflict",
+			})
+			return
+		}
+	}
 
 	_, err := db.Exec(`
 		UPDATE users
@@ -166,7 +182,6 @@ func UploadUserAvatar(c *gin.Context) {
 	}
 	defer file.Close()
 
-	// Envia para o bucket configurado na env, usando a pasta profilepic
 	uploadResult, err := storage.UploadOrgImage(file, header, "profilepic")
 	if err != nil {
 		log.Printf("Erro no upload do avatar: %v", err)

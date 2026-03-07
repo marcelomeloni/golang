@@ -23,20 +23,21 @@ type OrganizerDetailResponse struct {
 }
 
 type OrganizerProfile struct {
-	ID        string    `json:"id"`
-	Name      string    `json:"name"`
-	Slug      string    `json:"slug"`
-	LogoURL   string    `json:"logoUrl"`
-	BannerURL string    `json:"bannerUrl"`
-	City      string    `json:"city"`
-	Instagram string    `json:"instagram"`
-	Facebook  string    `json:"facebook"`
-	Website   string    `json:"website"`
-	Phone     string    `json:"phone"`
-	WhatsApp  string    `json:"whatsapp"`
-	Email     string    `json:"email"`
-	Followers int       `json:"followers"`
-	Links     []OrgLink `json:"links"`
+	ID          string    `json:"id"`
+	Name        string    `json:"name"`
+	Slug        string    `json:"slug"`
+	LogoURL     string    `json:"logoUrl"`
+	BannerURL   string    `json:"bannerUrl"`
+	City        string    `json:"city"`
+	Instagram   string    `json:"instagram"`
+	Facebook    string    `json:"facebook"`
+	Website     string    `json:"website"`
+	Phone       string    `json:"phone"`
+	WhatsApp    string    `json:"whatsapp"`
+	Email       string    `json:"email"`
+	Followers   int       `json:"followers"`
+	IsFollowing bool      `json:"isFollowing"` // <-- NOVO CAMPO ADICIONADO
+	Links       []OrgLink `json:"links"`
 }
 
 type OrgLink struct {
@@ -58,7 +59,7 @@ type OrgEvent struct {
 }
 
 // ==========================================
-// HANDLER
+// HANDLERS
 // ==========================================
 
 func GetOrganizerDetail(c *gin.Context) {
@@ -69,6 +70,9 @@ func GetOrganizerDetail(c *gin.Context) {
 	}
 
 	db := config.GetDB()
+	
+	// Pega o ID do usuário (caso a rota use OptionalAuth)
+	userID := c.GetString("userID") 
 
 	// ------------------------------------------------------------------
 	// 1. DADOS DA ORGANIZAÇÃO + CONTAGEM DE SEGUIDORES
@@ -120,7 +124,20 @@ func GetOrganizerDetail(c *gin.Context) {
 		return
 	}
 
-	// Parse links JSONB
+	// Verifica se o usuário logado segue esta organização
+	isFollowing := false
+	if userID != "" {
+		err = db.QueryRow(`
+			SELECT EXISTS(
+				SELECT 1 FROM organization_followers 
+				WHERE organization_id = $1 AND user_id = $2
+			)
+		`, orgID, userID).Scan(&isFollowing)
+		if err != nil && err != sql.ErrNoRows {
+			log.Printf("Erro ao verificar follow: %v", err)
+		}
+	}
+
 	var links []OrgLink
 	if len(linksJSON) > 0 {
 		_ = json.Unmarshal(linksJSON, &links)
@@ -130,20 +147,21 @@ func GetOrganizerDetail(c *gin.Context) {
 	}
 
 	organizer := OrganizerProfile{
-		ID:        orgID,
-		Name:      orgName,
-		Slug:      orgSlug,
-		LogoURL:   logoURL,
-		BannerURL: bannerURL,
-		City:      city,
-		Instagram: instagram,
-		Facebook:  facebook,
-		Website:   website,
-		Phone:     phone,
-		WhatsApp:  whatsapp,
-		Email:     email,
-		Followers: followers,
-		Links:     links,
+		ID:          orgID,
+		Name:        orgName,
+		Slug:        orgSlug,
+		LogoURL:     logoURL,
+		BannerURL:   bannerURL,
+		City:        city,
+		Instagram:   instagram,
+		Facebook:    facebook,
+		Website:     website,
+		Phone:       phone,
+		WhatsApp:    whatsapp,
+		Email:       email,
+		Followers:   followers,
+		IsFollowing: isFollowing, // Retorna true ou false pro Frontend
+		Links:       links,
 	}
 
 	// ------------------------------------------------------------------
@@ -169,7 +187,6 @@ func GetOrganizerDetail(c *gin.Context) {
 	var events []OrgEvent
 	if err == nil {
 		defer rows.Close()
-
 		now := time.Now()
 
 		for rows.Next() {
@@ -195,11 +212,6 @@ func GetOrganizerDetail(c *gin.Context) {
 				startDateISO = evStartDate.Time.UTC().Format(time.RFC3339)
 			}
 
-			// Determina status para o frontend:
-			// 1. cancelled → sempre encerrado
-			// 2. end_date preenchido e já passou → encerrado
-			// 3. sem end_date mas start_date já passou → encerrado
-			// 4. caso contrário → normal
 			frontendStatus := "normal"
 			if evStatus == "cancelled" {
 				frontendStatus = "encerrado"
@@ -237,15 +249,12 @@ func GetOrganizerDetail(c *gin.Context) {
 // FOLLOW / UNFOLLOW
 // ------------------------------------------------------------------
 
-type FollowRequest struct {
-	UserID string `json:"user_id" binding:"required"`
-}
-
 func FollowOrganizer(c *gin.Context) {
 	orgSlug := c.Param("slug")
-	var req FollowRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "user_id é obrigatório"})
+	
+	userID := c.GetString("userID")
+	if userID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Usuário não autenticado"})
 		return
 	}
 
@@ -261,7 +270,7 @@ func FollowOrganizer(c *gin.Context) {
 		INSERT INTO organization_followers (organization_id, user_id)
 		VALUES ($1, $2)
 		ON CONFLICT (organization_id, user_id) DO NOTHING;
-	`, orgID, req.UserID)
+	`, orgID, userID)
 	if err != nil {
 		log.Printf("Erro ao seguir organização: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erro ao seguir organização"})
@@ -273,9 +282,10 @@ func FollowOrganizer(c *gin.Context) {
 
 func UnfollowOrganizer(c *gin.Context) {
 	orgSlug := c.Param("slug")
-	var req FollowRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "user_id é obrigatório"})
+	
+	userID := c.GetString("userID")
+	if userID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Usuário não autenticado"})
 		return
 	}
 
@@ -290,7 +300,7 @@ func UnfollowOrganizer(c *gin.Context) {
 	_, err := db.Exec(`
 		DELETE FROM organization_followers
 		WHERE organization_id = $1 AND user_id = $2;
-	`, orgID, req.UserID)
+	`, orgID, userID)
 	if err != nil {
 		log.Printf("Erro ao deixar de seguir: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erro ao deixar de seguir"})

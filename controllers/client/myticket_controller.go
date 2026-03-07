@@ -42,10 +42,13 @@ type MyTicket struct {
 	Status            string        `json:"status"`
 	QRCode            string        `json:"qrCode"`
 	LoteName          string        `json:"lote"`
-	TicketPrice       float64       `json:"ticketPrice"`       // preço pago pelo ingresso
+	TicketPrice       float64       `json:"ticketPrice"`
 	AllowTransfer     bool          `json:"allowTransfer"`
 	AllowReppyMarket  bool          `json:"allowReppyMarket"`
 	CurrentBatchPrice *float64      `json:"currentBatchPrice"`
+	IsListed          bool          `json:"isListed"`
+	ListingID         *string       `json:"listingId"`
+	ListingPrice      *float64      `json:"listingPrice"`
 	Evento            MyTicketEvent `json:"evento"`
 }
 
@@ -202,12 +205,26 @@ const myTicketsQuery = `
 			AND COALESCE(tc.in_reppy_market, true)
 			AND tb.price > 0                        AS allow_reppy_market,
 		(
-			SELECT MIN(tb2.price)
+			SELECT MAX(tb2.price)
 			FROM ticket_batches tb2
 			WHERE tb2.event_id    = e.id
 			  AND tb2.category_id = tb.category_id
 			  AND tb2.status      = 'active'
-		) AS current_batch_price
+		) AS current_batch_price,
+		EXISTS(
+			SELECT 1 FROM market_listings ml
+			WHERE ml.ticket_id = t.id AND ml.status = 'active'
+		) AS is_listed,
+		(
+			SELECT ml.id FROM market_listings ml
+			WHERE ml.ticket_id = t.id AND ml.status = 'active'
+			LIMIT 1
+		) AS listing_id,
+		(
+			SELECT ml.price FROM market_listings ml
+			WHERE ml.ticket_id = t.id AND ml.status = 'active'
+			LIMIT 1
+		) AS listing_price
 	FROM tickets t
 	JOIN orders          o  ON o.id  = t.order_id
 	JOIN events          e  ON e.id  = o.event_id
@@ -238,12 +255,26 @@ const singleTicketQuery = `
 			AND COALESCE(tc.in_reppy_market, true)
 			AND tb.price > 0                        AS allow_reppy_market,
 		(
-			SELECT MIN(tb2.price)
+			SELECT MAX(tb2.price)
 			FROM ticket_batches tb2
 			WHERE tb2.event_id    = e.id
 			  AND tb2.category_id = tb.category_id
 			  AND tb2.status      = 'active'
-		) AS current_batch_price
+		) AS current_batch_price,
+		EXISTS(
+			SELECT 1 FROM market_listings ml
+			WHERE ml.ticket_id = t.id AND ml.status = 'active'
+		) AS is_listed,
+		(
+			SELECT ml.id FROM market_listings ml
+			WHERE ml.ticket_id = t.id AND ml.status = 'active'
+			LIMIT 1
+		) AS listing_id,
+		(
+			SELECT ml.price FROM market_listings ml
+			WHERE ml.ticket_id = t.id AND ml.status = 'active'
+			LIMIT 1
+		) AS listing_price
 	FROM tickets t
 	JOIN orders          o  ON o.id  = t.order_id
 	JOIN events          e  ON e.id  = o.event_id
@@ -303,6 +334,9 @@ func scanTicketRow(scan func(...any) error, loc *time.Location) (MyTicket, error
 		locationJSON      []byte
 		allowReppyMarket  bool
 		currentBatchPrice sql.NullFloat64
+		isListed          bool
+		listingID         sql.NullString
+		listingPrice      sql.NullFloat64
 	)
 
 	err := scan(
@@ -312,6 +346,9 @@ func scanTicketRow(scan func(...any) error, loc *time.Location) (MyTicket, error
 		&startDate, &endDate, &locationJSON,
 		&allowReppyMarket,
 		&currentBatchPrice,
+		&isListed,
+		&listingID,
+		&listingPrice,
 	)
 	if err != nil {
 		return MyTicket{}, err
@@ -325,6 +362,18 @@ func scanTicketRow(scan func(...any) error, loc *time.Location) (MyTicket, error
 		batchPricePtr = &v
 	}
 
+	var listingIDPtr *string
+	if listingID.Valid {
+		v := listingID.String
+		listingIDPtr = &v
+	}
+
+	var listingPricePtr *float64
+	if listingPrice.Valid && listingPrice.Float64 > 0 {
+		v := listingPrice.Float64
+		listingPricePtr = &v
+	}
+
 	return MyTicket{
 		ID:                id,
 		EventID:           eventID,
@@ -335,6 +384,9 @@ func scanTicketRow(scan func(...any) error, loc *time.Location) (MyTicket, error
 		AllowTransfer:     allowTransfer.Bool,
 		AllowReppyMarket:  allowReppyMarket,
 		CurrentBatchPrice: batchPricePtr,
+		IsListed:          isListed,
+		ListingID:         listingIDPtr,
+		ListingPrice:      listingPricePtr,
 		Evento: MyTicketEvent{
 			Slug:         slug,
 			Nome:         title,

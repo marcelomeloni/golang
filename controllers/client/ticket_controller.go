@@ -79,23 +79,23 @@ func CreateMarketListing(c *gin.Context) {
 		return
 	}
 
-	// Bloqueia ingresso gratuito — não faz sentido revender por preço < 0
+	// Bloqueia ingresso gratuito — não faz sentido revender
 	if req.Price <= 0 {
 		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "ingressos gratuitos não podem ser vendidos no Reppy Market"})
 		return
 	}
 
-	// Regra central: preço deve ser menor que o menor lote ativo da mesma categoria.
-	currentMin, err := activeMinPriceByCategory(db, eventID, categoryID)
-	if err != nil || currentMin == 0 {
+	// Regra central: preço deve ser menor que o maior lote ativo da mesma categoria.
+	currentMax, err := activeMaxPriceByCategory(db, eventID, categoryID)
+	if err != nil || currentMax == 0 {
 		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "nenhum lote ativo encontrado para esta categoria"})
 		return
 	}
 
-	if req.Price >= currentMin {
+	if req.Price >= currentMax {
 		c.JSON(http.StatusUnprocessableEntity, gin.H{
 			"error":    "preço deve ser menor que o lote atual da categoria",
-			"maxPrice": currentMin - 0.01,
+			"maxPrice": currentMax - 0.01,
 		})
 		return
 	}
@@ -170,17 +170,17 @@ func UpdateMarketListing(c *gin.Context) {
 		return
 	}
 
-	// Mesma regra: preço < menor lote ativo da categoria
-	currentMin, err := activeMinPriceByCategory(db, eventID, categoryID)
-	if err != nil || currentMin == 0 {
+	// Mesma regra: preço < maior lote ativo da categoria
+	currentMax, err := activeMaxPriceByCategory(db, eventID, categoryID)
+	if err != nil || currentMax == 0 {
 		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "nenhum lote ativo encontrado para esta categoria"})
 		return
 	}
 
-	if req.Price >= currentMin {
+	if req.Price >= currentMax {
 		c.JSON(http.StatusUnprocessableEntity, gin.H{
 			"error":    "preço deve ser menor que o lote atual da categoria",
-			"maxPrice": currentMin - 0.01,
+			"maxPrice": currentMax - 0.01,
 		})
 		return
 	}
@@ -210,7 +210,7 @@ func DeleteMarketListing(c *gin.Context) {
 	db := config.GetDB()
 
 	result, err := db.Exec(`
-		UPDATE market_listings SET status = 'cancelled', updated_at = NOW()
+		UPDATE market_listings SET status = 'canceled', updated_at = NOW()
 		WHERE id = $1 AND seller_id = $2 AND status = 'active'
 	`, listingID, userID)
 	if err != nil {
@@ -435,34 +435,35 @@ func RequestRefund(c *gin.Context) {
 // Helpers
 // ──────────────────────────────────────────────
 
-// activeMinPriceByCategory retorna o menor preço entre os lotes ativos
-// do mesmo event_id e category_id. É o teto de referência para o Reppy Market.
-// Quando category_id é NULL, usa o menor lote ativo do evento inteiro.
-func activeMinPriceByCategory(db *sql.DB, eventID string, categoryID sql.NullString) (float64, error) {
-	var minPrice sql.NullFloat64
+// activeMaxPriceByCategory retorna o maior preço entre os lotes ativos
+// do mesmo event_id e category_id. É o teto de referência para o Reppy Market:
+// o vendedor não pode anunciar acima do lote mais caro em circulação.
+// Quando category_id é NULL, usa o maior lote ativo do evento inteiro.
+func activeMaxPriceByCategory(db *sql.DB, eventID string, categoryID sql.NullString) (float64, error) {
+	var maxPrice sql.NullFloat64
 	var err error
 
 	if categoryID.Valid {
 		err = db.QueryRow(`
-			SELECT MIN(price)
+			SELECT MAX(price)
 			FROM ticket_batches
 			WHERE event_id    = $1
 			  AND category_id = $2
 			  AND status      = 'active'
-		`, eventID, categoryID.String).Scan(&minPrice)
+		`, eventID, categoryID.String).Scan(&maxPrice)
 	} else {
 		err = db.QueryRow(`
-			SELECT MIN(price)
+			SELECT MAX(price)
 			FROM ticket_batches
 			WHERE event_id = $1
 			  AND status   = 'active'
-		`, eventID).Scan(&minPrice)
+		`, eventID).Scan(&maxPrice)
 	}
 
-	if err != nil || !minPrice.Valid {
+	if err != nil || !maxPrice.Valid {
 		return 0, err
 	}
-	return minPrice.Float64, nil
+	return maxPrice.Float64, nil
 }
 
 func sanitizeCPF(cpf string) string {
