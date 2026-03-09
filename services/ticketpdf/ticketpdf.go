@@ -109,20 +109,10 @@ func renderHTML(data templateInput) (string, error) {
 }
 
 func htmlToPDF(htmlContent string) ([]byte, error) {
-	opts := append(chromedp.DefaultExecAllocatorOptions[:],
-		chromedp.NoSandbox,
-		chromedp.Headless,
-		chromedp.DisableGPU,
-		chromedp.Flag("disable-dev-shm-usage", true),
-	)
-
-	allocCtx, cancelAlloc := chromedp.NewExecAllocator(context.Background(), opts...)
-	defer cancelAlloc()
-
-	ctx, cancel := chromedp.NewContext(allocCtx)
+	ctx, cancel := chromedp.NewContext(context.Background())
 	defer cancel()
 
-	ctx, cancel = context.WithTimeout(ctx, 20*time.Second)
+	ctx, cancel = context.WithTimeout(ctx, pdfTimeout)
 	defer cancel()
 
 	var pdfBuf []byte
@@ -135,16 +125,17 @@ func htmlToPDF(htmlContent string) ([]byte, error) {
 			}
 			return page.SetDocumentContent(tree.Frame.ID, htmlContent).Do(ctx)
 		}),
-		chromedp.Sleep(1*time.Second),
+		chromedp.Sleep(pdfRenderDelay),
 		chromedp.ActionFunc(func(ctx context.Context) error {
 			var err error
 			pdfBuf, _, err = page.PrintToPDF().
 				WithPrintBackground(true).
-				WithPaperWidth(8.27).
-				WithPaperHeight(11.69).
+				WithPaperWidth(pdfPaperWidth).
+				WithPaperHeight(pdfPaperHeight).
 				Do(ctx)
 			return err
 		}),
 	)
+
 	return pdfBuf, err
 }
