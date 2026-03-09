@@ -151,7 +151,17 @@ func DownloadTicket(c *gin.Context) {
 }
 
 func htmlToPDF(htmlContent string) ([]byte, error) {
-	ctx, cancel := chromedp.NewContext(context.Background())
+	opts := append(chromedp.DefaultExecAllocatorOptions[:],
+		chromedp.NoSandbox,
+		chromedp.Headless,
+		chromedp.DisableGPU,
+		chromedp.Flag("disable-dev-shm-usage", true),
+	)
+
+	allocCtx, cancelAlloc := chromedp.NewExecAllocator(context.Background(), opts...)
+	defer cancelAlloc()
+
+	ctx, cancel := chromedp.NewContext(allocCtx)
 	defer cancel()
 
 	ctx, cancel = context.WithTimeout(ctx, 20*time.Second)
@@ -181,9 +191,7 @@ func htmlToPDF(htmlContent string) ([]byte, error) {
 	return pdfBuf, err
 }
 
-// ──────────────────────────────────────────────
-// Queries
-// ──────────────────────────────────────────────
+
 
 const myTicketsQuery = `
 	SELECT

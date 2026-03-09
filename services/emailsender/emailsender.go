@@ -2,6 +2,7 @@ package emailsender
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -16,20 +17,28 @@ const resendAPI = "https://api.resend.com/emails"
 
 // Recipient representa um destinatário de e-mail.
 type Recipient struct {
-	Name  string // usado para substituição de {{NOME}} no template
+	Name  string
 	Email string
+}
+
+// Attachment representa um arquivo anexado ao e-mail.
+type Attachment struct {
+	Filename    string
+	Content     []byte // bytes brutos — será codificado em base64 internamente
+	ContentType string // ex: "application/pdf"
 }
 
 // Message contém tudo necessário para enviar um e-mail.
 type Message struct {
-	From      string            // ex: "Reppy <noreply@reppy.com.br>"
-	To        []Recipient
-	Subject   string
-	HTMLBody  string            // HTML já renderizado (pode conter {{CHAVE}})
-	Variables map[string]string // variáveis extras substituídas no HTML
+	From        string
+	To          []Recipient
+	Subject     string
+	HTMLBody    string
+	Variables   map[string]string
+	Attachments []Attachment
 }
 
-// Result é retornado após o envio de cada e-mail.
+// Result é retornado após o envio bem-sucedido de cada e-mail.
 type Result struct {
 	ID    string
 	Email string
@@ -70,12 +79,18 @@ func (s *resendSender) Send(msg Message) ([]Result, error) {
 	for _, r := range msg.To {
 		html := applyVariables(msg.HTMLBody, r, msg.Variables)
 
-		id, err := s.post(map[string]interface{}{
+		payload := map[string]interface{}{
 			"from":    msg.From,
 			"to":      []string{r.Email},
 			"subject": msg.Subject,
 			"html":    html,
-		})
+		}
+
+		if len(msg.Attachments) > 0 {
+			payload["attachments"] = buildAttachments(msg.Attachments)
+		}
+
+		id, err := s.post(payload)
 		if err != nil {
 			lastErr = fmt.Errorf("emailsender: %s: %w", r.Email, err)
 			continue
@@ -117,6 +132,22 @@ func (s *resendSender) post(payload map[string]interface{}) (string, error) {
 	}
 
 	return body.ID, nil
+}
+
+// ──────────────────────────────────────────────
+// Helpers
+// ──────────────────────────────────────────────
+
+// buildAttachments converte []Attachment para o formato esperado pela API do Resend.
+func buildAttachments(attachments []Attachment) []map[string]string {
+	out := make([]map[string]string, len(attachments))
+	for i, a := range attachments {
+		out[i] = map[string]string{
+			"filename": a.Filename,
+			"content":  base64.StdEncoding.EncodeToString(a.Content),
+		}
+	}
+	return out
 }
 
 // applyVariables substitui {{NOME}}, {{EMAIL}} e as chaves de vars no HTML.

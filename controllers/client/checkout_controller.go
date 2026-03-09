@@ -7,12 +7,14 @@ import (
 
 	"bilheteria-api/config"
 	"bilheteria-api/services/couponservice"
+	"bilheteria-api/services/emailsender"
 	"bilheteria-api/services/orderservice"
 	"bilheteria-api/services/paymentservice"
 	"github.com/gin-gonic/gin"
 )
 
-// ValidateCoupon → POST /client/checkout/coupon
+var defaultEmailSender = emailsender.New("")
+
 func ValidateCoupon(c *gin.Context) {
 	var req ValidateCouponRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -38,7 +40,6 @@ func ValidateCoupon(c *gin.Context) {
 	})
 }
 
-// CreateOrder → POST /client/checkout/orders
 func CreateOrder(c *gin.Context) {
 	var req CreateOrderRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -76,8 +77,6 @@ func CreateOrder(c *gin.Context) {
 		return
 	}
 
-	// ── 1. Lotes ──────────────────────────────────────────────────────────────
-
 	lotIDs := make([]string, len(req.Items))
 	for i, item := range req.Items {
 		lotIDs[i] = item.LotID
@@ -102,8 +101,6 @@ func CreateOrder(c *gin.Context) {
 
 	subtotal, allFree := orderservice.CalcSubtotal(batches, items)
 
-	// ── 2. Cupom ──────────────────────────────────────────────────────────────
-
 	var appliedCoupon *couponservice.Coupon
 	var discountAmount float64
 
@@ -122,8 +119,6 @@ func CreateOrder(c *gin.Context) {
 		discountAmount = couponservice.ApplyDiscount(subtotal, coupon)
 	}
 
-	// ── 3. Taxa de plataforma ─────────────────────────────────────────────────
-
 	var platformFeeAmount float64
 	if !allFree {
 		platformFeeAmount = orderservice.CalcPlatformFee(db, req.EventID, batches, items)
@@ -133,8 +128,6 @@ func CreateOrder(c *gin.Context) {
 	if grandTotal < 0 {
 		grandTotal = 0
 	}
-
-	// ── 4. Persistir em transação ─────────────────────────────────────────────
 
 	tx, err := db.Begin()
 	if err != nil {
@@ -164,10 +157,13 @@ func CreateOrder(c *gin.Context) {
 		return
 	}
 
-	// ── 5. Gratuito → confirma direto; pago → gera Pix ───────────────────────
-
 	if allFree || grandTotal == 0 {
-		// TODO: enviar e-mail de confirmação via emailsender
+		go func() {
+			if err := orderservice.SendConfirmationEmail(db, defaultEmailSender, orderID); err != nil {
+				log.Printf("CreateOrder SendConfirmationEmail orderID=%s: %v", orderID, err)
+			}
+		}()
+
 		c.JSON(http.StatusCreated, CreateOrderResponse{
 			OrderID:           orderID,
 			PaymentMethod:     "manual",
@@ -180,8 +176,7 @@ func CreateOrder(c *gin.Context) {
 
 	pixResult, err := paymentservice.Default.GeneratePix(orderID, grandTotal, req.BuyerName, req.BuyerEmail, req.BuyerCPF, "")
 	if err != nil {
-		// Pedido já foi persistido — logamos mas não revertemos para evitar perda de dados.
-		// O webhook de expiração vai limpar pedidos sem pagamento.
+		// Pedido já persistido — não revertemos para evitar perda de dados. O webhook de expiração limpa pedidos sem pagamento.
 		log.Printf("CreateOrder GeneratePix orderID=%s: %v", orderID, err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao gerar cobrança Pix"})
 		return
@@ -189,7 +184,6 @@ func CreateOrder(c *gin.Context) {
 
 	if err := orderservice.SavePixCharge(db, orderID, pixResult.ExternalID); err != nil {
 		log.Printf("CreateOrder SavePixCharge orderID=%s: %v", orderID, err)
-		// não fatal — o cliente ainda recebe o QR code
 	}
 
 	c.JSON(http.StatusAccepted, CreateOrderResponse{
@@ -203,10 +197,6 @@ func CreateOrder(c *gin.Context) {
 	})
 }
 
-// CheckPixStatus → GET /client/checkout/orders/:orderID/pix/status
-//
-// Consulta o status atual do Pix diretamente no AbacatePay.
-// Útil para polling no frontend enquanto aguarda confirmação do pagamento.
 func CheckPixStatus(c *gin.Context) {
 	orderID := c.Param("orderID")
 
@@ -226,6 +216,6 @@ func CheckPixStatus(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{
 		"orderID": orderID,
-		"status":  status, // PENDING | PAID | EXPIRED | CANCELLED | REFUNDED
+		"status":  status,
 	})
 }
