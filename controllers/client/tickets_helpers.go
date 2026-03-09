@@ -7,16 +7,6 @@ import (
 	"time"
 )
 
-type Location struct {
-	VenueName    string `json:"venueName"`
-	Street       string `json:"street"`
-	Number       string `json:"number"`
-	Neighborhood string `json:"neighborhood"`
-	City         string `json:"city"`
-	State        string `json:"state"`
-	CEP          string `json:"cep"`
-}
-
 var (
 	diasSemana = []string{"Dom", "Seg", "Ter", "Qua", "Qui", "Sex", "Sáb"}
 	meses      = []string{"", "Jan", "Fev", "Mar", "Abr", "Mai", "Jun", "Jul", "Ago", "Set", "Out", "Nov", "Dez"}
