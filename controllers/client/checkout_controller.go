@@ -13,7 +13,13 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-var defaultEmailSender = emailsender.New("")
+var defaultEmailSender emailsender.Sender
+
+// InitEmailSender inicializa o remetente de e-mail após as variáveis de ambiente terem sido carregadas.
+// Deve ser chamado no main.go após godotenv.Load()
+func InitEmailSender() {
+	defaultEmailSender = emailsender.New("")
+}
 
 func ValidateCoupon(c *gin.Context) {
 	var req ValidateCouponRequest

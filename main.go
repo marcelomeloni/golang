@@ -8,7 +8,11 @@ import (
 	"bilheteria-api/middleware"
 	"bilheteria-api/services/paymentservice"
 
-	clientRoutes   "bilheteria-api/routes/client"
+	// Import dos Controllers (onde está a lógica e o InitEmailSender)
+	clientControllers "bilheteria-api/controllers/client"
+
+	// Import das Rotas
+	clientRoutes "bilheteria-api/routes/client"
 	organizerRoutes "bilheteria-api/routes/organizer"
 	webhookRoutes "bilheteria-api/routes/webhooks"
 
@@ -17,10 +21,15 @@ import (
 )
 
 func main() {
+	// 1. Carrega as variáveis de ambiente PRIMEIRO
 	if err := godotenv.Load(); err != nil {
 		log.Println("⚠️  .env não encontrado, usando variáveis de ambiente do sistema")
 	}
 
+	// 2. AGORA SIM inicializamos o serviço de e-mail (usando os controllers!)
+	clientControllers.InitEmailSender()
+
+	// 3. Inicializa os outros serviços
 	config.InitDB()
 	middleware.InitJWKS()
 

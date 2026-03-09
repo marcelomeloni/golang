@@ -57,6 +57,9 @@ func Register(r *gin.Engine) {
 			authed.PATCH("/radar/events/:eventId/mode",               client.ToggleRadarMode)
 			authed.POST("/radar/events/:eventId/tap/:targetUserId",   client.TapUser)
 			authed.DELETE("/radar/events/:eventId/tap/:targetUserId", client.RemoveTap)
+			
+			// --- BLOQUEIOS DO RADAR ---
+			authed.GET("/radar/blocks",                               client.GetBlockedUsers) // <-- NOVA ROTA AQUI
 			authed.POST("/radar/block/:targetUserId",                 client.BlockRadarUser)
 			authed.DELETE("/radar/block/:targetUserId",               client.UnblockRadarUser)
 		}

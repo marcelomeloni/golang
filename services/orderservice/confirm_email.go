@@ -2,25 +2,25 @@ package orderservice
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"log"
+	"os"
 
 	"bilheteria-api/services/emailsender"
 	"bilheteria-api/services/emailtemplates"
 	"bilheteria-api/services/ticketpdf"
 )
 
-const fromAddress = "Reppy <noreply@reppy.com.br>"
-
 // orderEmailData agrega os dados do pedido necessários para montar o e-mail.
 type orderEmailData struct {
-	BuyerName  string
-	BuyerEmail string
-	EventoNome string
-	EventoData string
-	EventoHora string
+	BuyerName   string
+	BuyerEmail  string
+	EventoNome  string
+	EventoData  string
+	EventoHora  string
 	EventoLocal string
-	Tickets    []ticketEmailRow
+	Tickets     []ticketEmailRow
 }
 
 type ticketEmailRow struct {
@@ -33,10 +33,6 @@ type ticketEmailRow struct {
 
 // SendConfirmationEmail busca todos os ingressos do pedido, gera um PDF por ingresso
 // e envia o e-mail de confirmação com os PDFs em anexo.
-//
-// Deve ser chamado logo após o pedido ser marcado como "paid" —
-// tanto para pedidos gratuitos (direto no checkout) quanto para pedidos pagos
-// (a partir do webhook de confirmação do Pix).
 func SendConfirmationEmail(db *sql.DB, sender emailsender.Sender, orderID string) error {
 	data, err := loadOrderEmailData(db, orderID)
 	if err != nil {
@@ -44,7 +40,6 @@ func SendConfirmationEmail(db *sql.DB, sender emailsender.Sender, orderID string
 	}
 
 	if data.BuyerEmail == "" {
-		// Pedido de guest sem e-mail — não há destinatário, nada a fazer.
 		log.Printf("SendConfirmationEmail: pedido %s sem e-mail, pulando envio", orderID)
 		return nil
 	}
@@ -67,6 +62,11 @@ func SendConfirmationEmail(db *sql.DB, sender emailsender.Sender, orderID string
 		return fmt.Errorf("SendConfirmationEmail: montar template: %w", err)
 	}
 
+	fromAddress := os.Getenv("RESEND_FROM")
+	if fromAddress == "" {
+		fromAddress = "Reppy <noreply@reppy.app.br>"
+	}
+
 	_, err = sender.Send(emailsender.Message{
 		From:        fromAddress,
 		To:          []emailsender.Recipient{{Name: data.BuyerName, Email: data.BuyerEmail}},
@@ -76,10 +76,6 @@ func SendConfirmationEmail(db *sql.DB, sender emailsender.Sender, orderID string
 	})
 	return err
 }
-
-// ──────────────────────────────────────────────
-// Geração dos anexos PDF
-// ──────────────────────────────────────────────
 
 func buildTicketAttachments(tickets []ticketEmailRow) ([]emailsender.Attachment, error) {
 	attachments := make([]emailsender.Attachment, 0, len(tickets))
@@ -93,7 +89,6 @@ func buildTicketAttachments(tickets []ticketEmailRow) ([]emailsender.Attachment,
 			Evento:   t.Evento,
 		})
 		if err != nil {
-			// Falha em um ingresso não impede o envio dos demais — logamos e continuamos.
 			log.Printf("buildTicketAttachments: gerar PDF do ingresso %s: %v", t.ID, err)
 			continue
 		}
@@ -111,10 +106,6 @@ func buildTicketAttachments(tickets []ticketEmailRow) ([]emailsender.Attachment,
 
 	return attachments, nil
 }
-
-// ──────────────────────────────────────────────
-// Query e scan
-// ──────────────────────────────────────────────
 
 const orderEmailQuery = `
 	SELECT
@@ -146,19 +137,20 @@ func loadOrderEmailData(db *sql.DB, orderID string) (*orderEmailData, error) {
 	defer rows.Close()
 
 	var result *orderEmailData
+	loc := loadLocation()
 
 	for rows.Next() {
 		var (
-			buyerName   string
-			buyerEmail  string
-			eventoNome  string
-			startDate   sql.NullTime
+			buyerName    string
+			buyerEmail   string
+			eventoNome   string
+			startDate    sql.NullTime
 			locationJSON []byte
-			ticketID    string
-			qrCode      string
-			status      string
-			loteName    string
-			imageURL    string
+			ticketID     string
+			qrCode       string
+			status       string
+			loteName     string
+			imageURL     string
 		)
 
 		if err := rows.Scan(
@@ -169,18 +161,39 @@ func loadOrderEmailData(db *sql.DB, orderID string) (*orderEmailData, error) {
 			return nil, fmt.Errorf("scan: %w", err)
 		}
 
-		// Inicializa o resultado com os dados do pedido na primeira linha.
-		if result == nil {
-			loc := loadLocation()
-			addr := parseLocationJSON(locationJSON)
+	
+		var addr struct {
+			VenueName    string `json:"venue_name"`
+			Street       string `json:"street"`
+			Number       string `json:"number"`
+			Neighborhood string `json:"neighborhood"`
+			City         string `json:"city"`
+			State        string `json:"state"`
+			CEP          string `json:"cep"`
+		}
+		
+		if len(locationJSON) > 0 {
+			_ = json.Unmarshal(locationJSON, &addr)
+		}
 
+		// (Opcional, mas seguro): Formata a string curta do local para o e-mail em si
+		localCurto := "Local a definir"
+		if addr.VenueName != "" && addr.City != "" {
+			localCurto = fmt.Sprintf("%s, %s", addr.VenueName, addr.City)
+		} else if addr.VenueName != "" {
+			localCurto = addr.VenueName
+		} else if addr.City != "" {
+			localCurto = addr.City
+		}
+
+		if result == nil {
 			result = &orderEmailData{
 				BuyerName:   buyerName,
 				BuyerEmail:  buyerEmail,
 				EventoNome:  eventoNome,
 				EventoData:  formatEmailDate(startDate, loc),
 				EventoHora:  formatEmailTime(startDate, loc),
-				EventoLocal: formatVenueShort(addr),
+				EventoLocal: localCurto,
 			}
 		}
 
@@ -193,13 +206,13 @@ func loadOrderEmailData(db *sql.DB, orderID string) (*orderEmailData, error) {
 				Nome:         eventoNome,
 				Data:         result.EventoData,
 				Hora:         result.EventoHora,
-				VenueName:    parseLocationJSON(locationJSON).VenueName,
-				Street:       parseLocationJSON(locationJSON).Street,
-				Number:       parseLocationJSON(locationJSON).Number,
-				Neighborhood: parseLocationJSON(locationJSON).Neighborhood,
-				City:         parseLocationJSON(locationJSON).City,
-				State:        parseLocationJSON(locationJSON).State,
-				CEP:          parseLocationJSON(locationJSON).CEP,
+				VenueName:    addr.VenueName,
+				Street:       addr.Street,
+				Number:       addr.Number,
+				Neighborhood: addr.Neighborhood,
+				City:         addr.City,
+				State:        addr.State,
+				CEP:          addr.CEP,
 				ImageURL:     imageURL,
 			},
 		})
@@ -214,10 +227,6 @@ func loadOrderEmailData(db *sql.DB, orderID string) (*orderEmailData, error) {
 
 	return result, nil
 }
-
-// ──────────────────────────────────────────────
-// Conversão para o formato do template
-// ──────────────────────────────────────────────
 
 func toTemplateLines(tickets []ticketEmailRow) []emailtemplates.TicketLine {
 	lines := make([]emailtemplates.TicketLine, len(tickets))

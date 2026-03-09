@@ -454,3 +454,43 @@ func UnblockRadarUser(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{"blocked": false})
 }
+
+type BlockedProfile struct {
+	UserID    string `json:"userId"`
+	Name      string `json:"name"`
+	AvatarURL string `json:"avatarUrl"`
+}
+
+func GetBlockedUsers(c *gin.Context) {
+	userID, _ := c.Get("userID")
+	db := config.GetDB()
+
+	rows, err := db.Query(`
+		SELECT 
+			u.id, 
+			u.full_name, 
+			COALESCE(u.avatar_url, '') AS avatar_url
+		FROM radar_blocks rb
+		JOIN users u ON u.id = rb.blocked_user_id
+		WHERE rb.blocker_user_id = $1
+		ORDER BY rb.created_at DESC
+	`, userID)
+	if err != nil {
+		log.Printf("GetBlockedUsers query: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "erro interno"})
+		return
+	}
+	defer rows.Close()
+
+	blockedUsers := []BlockedProfile{}
+	for rows.Next() {
+		var p BlockedProfile
+		if err := rows.Scan(&p.UserID, &p.Name, &p.AvatarURL); err != nil {
+			log.Printf("GetBlockedUsers scan: %v", err)
+			continue
+		}
+		blockedUsers = append(blockedUsers, p)
+	}
+
+	c.JSON(http.StatusOK, gin.H{"users": blockedUsers})
+}
