@@ -19,6 +19,8 @@ type EventCard struct {
 	Title    string `json:"title"`
 	Slug     string `json:"slug"`
 	Venue    string `json:"venue"`
+	City     string `json:"city"`
+	State    string `json:"state"`
 	Date     string `json:"date"`
 	Time     string `json:"time"`
 	Category string `json:"category"`
@@ -217,9 +219,13 @@ func fetchEvents(db *sql.DB, query string, args ...interface{}) ([]EventCard, er
 		}
 
 		venueStr := "Local a definir"
+		var cityStr, stateStr string
+
 		if len(locationJSON) > 0 {
 			var locData Location
 			if err := json.Unmarshal(locationJSON, &locData); err == nil {
+				cityStr = locData.City
+				stateStr = locData.State
 				switch {
 				case locData.VenueName != "" && locData.City != "":
 					venueStr = fmt.Sprintf("%s, %s", locData.VenueName, locData.City)
@@ -247,6 +253,8 @@ func fetchEvents(db *sql.DB, query string, args ...interface{}) ([]EventCard, er
 			Title:    title,
 			Slug:     slug,
 			Venue:    venueStr,
+			City:     cityStr,
+			State:    stateStr,
 			Date:     dateStr,
 			Time:     timeStr,
 			Category: category.String,
