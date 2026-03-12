@@ -40,10 +40,11 @@ func ValidateCoupon(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, ValidateCouponResponse{
-		Valid:         true,
-		DiscountType:  coupon.DiscountType,
-		DiscountValue: coupon.DiscountValue,
-	})
+    Valid:          true,
+    DiscountType:   coupon.DiscountType,
+    DiscountValue:  coupon.DiscountValue,
+    DiscountAmount: couponservice.ApplyDiscount(req.Subtotal, coupon), 
+})
 }
 
 func CreateOrder(c *gin.Context) {

@@ -26,13 +26,15 @@ type CreateOrderResponse struct {
 }
 
 type ValidateCouponRequest struct {
-	EventID string `json:"eventId" binding:"required"`
-	Code    string `json:"code"    binding:"required"`
+	EventID  string  `json:"eventId"  binding:"required"`
+	Code     string  `json:"code"     binding:"required"`
+	Subtotal float64 `json:"subtotal" binding:"required"` 
 }
 
 type ValidateCouponResponse struct {
-	Valid         bool    `json:"valid"`
-	DiscountType  string  `json:"discountType,omitempty"`
-	DiscountValue float64 `json:"discountValue,omitempty"`
-	Message       string  `json:"message,omitempty"`
+	Valid           bool    `json:"valid"`
+	DiscountType    string  `json:"discountType,omitempty"`
+	DiscountValue   float64 `json:"discountValue,omitempty"`
+	DiscountAmount  float64 `json:"discountAmount,omitempty"`
+	Message         string  `json:"message,omitempty"`
 }

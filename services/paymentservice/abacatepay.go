@@ -12,7 +12,7 @@ import (
 
 const (
 	abacateBaseURL  = "https://api.abacatepay.com/v1"
-	pixExpiresInSec = 3600 // 1 hora
+	pixExpiresInSec = 900
 )
 
 // ── Request / Response DTOs ───────────────────────────────────────────────────
