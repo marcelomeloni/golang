@@ -12,7 +12,7 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-const marketPlatformFee = 0.80
+const marketPlatformFee = 1.6
 
 func CreateMarketOrder(c *gin.Context) {
 	var req CreateMarketOrderRequest
@@ -171,8 +171,9 @@ func createMarketOrder(tx *sql.Tx, eventID string, buyerID sql.NullString, total
 	var orderID string
 	err := tx.QueryRow(`
 		INSERT INTO orders
-		  (event_id, user_id, total_amount, platform_fee_amount, net_amount, status, payment_method)
-		VALUES ($1, $2, $3, $4, $5, 'pending', 'pix')
+		  (event_id, user_id, total_amount, platform_fee_amount, net_amount,
+		   status, payment_method, order_type)
+		VALUES ($1, $2, $3, $4, $5, 'pending', 'pix', 'market')
 		RETURNING id
 	`, eventID, buyerID, total, platformFee, total-platformFee).Scan(&orderID)
 	return orderID, err

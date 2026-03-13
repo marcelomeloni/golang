@@ -1,4 +1,3 @@
-// controllers/client/user_controller.go
 package client
 
 import (
@@ -13,10 +12,6 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// ==========================================
-// ESTRUTURAS
-// ==========================================
-
 type UserProfileResponse struct {
 	ID                  string `json:"id"`
 	FullName            string `json:"fullName"`
@@ -25,8 +20,10 @@ type UserProfileResponse struct {
 	Phone               string `json:"phone"`
 	Instagram           string `json:"instagram"`
 	AvatarURL           string `json:"avatarUrl"`
-	BirthDate           string `json:"birthDate"` // YYYY-MM-DD
+	BirthDate           string `json:"birthDate"`
 	AttendedEventsCount int    `json:"attendedEventsCount"`
+	PixKey              string `json:"pixKey"`
+	PixKeyType          string `json:"pixKeyType"`
 }
 
 type UpdateProfileRequest struct {
@@ -35,11 +32,11 @@ type UpdateProfileRequest struct {
 	Instagram string `json:"instagram"`
 }
 
-// ==========================================
-// HANDLERS
-// ==========================================
+type UpdatePixKeyRequest struct {
+	PixKey     string `json:"pixKey"     binding:"required"`
+	PixKeyType string `json:"pixKeyType" binding:"required"`
+}
 
-// GetUserProfile — retorna o perfil completo do usuário autenticado
 func GetUserProfile(c *gin.Context) {
 	userID := c.Param("userId")
 	if userID == "" {
@@ -59,6 +56,8 @@ func GetUserProfile(c *gin.Context) {
 		avatarURL           sql.NullString
 		birthDate           sql.NullTime
 		attendedEventsCount int
+		pixKey              sql.NullString
+		pixKeyType          sql.NullString
 	)
 
 	err := db.QueryRow(`
@@ -71,19 +70,22 @@ func GetUserProfile(c *gin.Context) {
 			COALESCE(instagram, ''),
 			COALESCE(avatar_url, ''),
 			birth_date,
-			COALESCE(attended_events_count, 0)
+			COALESCE(attended_events_count, 0),
+			pix_key,
+			pix_key_type
 		FROM users
 		WHERE id = $1
 	`, userID).Scan(
 		&id, &fullName, &email, &cpf, &phone,
 		&instagram, &avatarURL, &birthDate, &attendedEventsCount,
+		&pixKey, &pixKeyType,
 	)
 
 	if err == sql.ErrNoRows {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Usuário não encontrado"})
 		return
 	} else if err != nil {
-		log.Printf("Erro ao buscar perfil: %v", err)
+		log.Printf("GetUserProfile: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erro interno"})
 		return
 	}
@@ -108,11 +110,11 @@ func GetUserProfile(c *gin.Context) {
 		AvatarURL:           avatarURL.String,
 		BirthDate:           birthDateStr,
 		AttendedEventsCount: attendedEventsCount,
+		PixKey:              pixKey.String,
+		PixKeyType:          pixKeyType.String,
 	})
 }
 
-// UpdateUserProfile — atualiza campos editáveis.
-// Regra de negócio: CPF e data de nascimento são imutáveis após o onboarding.
 func UpdateUserProfile(c *gin.Context) {
 	userID := c.Param("userId")
 	if userID == "" {
@@ -132,7 +134,6 @@ func UpdateUserProfile(c *gin.Context) {
 
 	db := config.GetDB()
 
-	// Telefone duplicado em outra conta?
 	if phone != "" {
 		var existingID string
 		err := db.QueryRow(
@@ -159,7 +160,7 @@ func UpdateUserProfile(c *gin.Context) {
 	`, fullName, phone, instagram, time.Now(), userID)
 
 	if err != nil {
-		log.Printf("Erro ao atualizar perfil: %v", err)
+		log.Printf("UpdateUserProfile: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erro ao salvar alterações"})
 		return
 	}
@@ -167,7 +168,38 @@ func UpdateUserProfile(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"success": true})
 }
 
-// UploadUserAvatar — processa a imagem do usuário e atualiza a URL no perfil
+// UpdatePixKey salva ou atualiza a chave PIX do usuário para recebimento de vendas no Reppy Market.
+func UpdatePixKey(c *gin.Context) {
+	userID := c.Param("userId")
+	if userID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "userId é obrigatório"})
+		return
+	}
+
+	var req UpdatePixKeyRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "pixKey e pixKeyType são obrigatórios"})
+		return
+	}
+
+	validTypes := map[string]bool{"cpf": true, "email": true, "phone": true, "random": true}
+	if !validTypes[req.PixKeyType] {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "pixKeyType inválido"})
+		return
+	}
+
+	_, err := config.GetDB().Exec(`
+		UPDATE users SET pix_key = $1, pix_key_type = $2, updated_at = $3 WHERE id = $4
+	`, strings.TrimSpace(req.PixKey), req.PixKeyType, time.Now(), userID)
+	if err != nil {
+		log.Printf("UpdatePixKey: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erro ao salvar chave PIX"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"success": true})
+}
+
 func UploadUserAvatar(c *gin.Context) {
 	userID := c.Param("userId")
 	if userID == "" {
@@ -184,26 +216,19 @@ func UploadUserAvatar(c *gin.Context) {
 
 	uploadResult, err := storage.UploadOrgImage(file, header, "profilepic")
 	if err != nil {
-		log.Printf("Erro no upload do avatar: %v", err)
+		log.Printf("UploadUserAvatar upload: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erro ao processar imagem"})
 		return
 	}
 
-	db := config.GetDB()
-	_, err = db.Exec(`
-		UPDATE users
-		SET avatar_url = $1, updated_at = $2
-		WHERE id = $3
+	_, err = config.GetDB().Exec(`
+		UPDATE users SET avatar_url = $1, updated_at = $2 WHERE id = $3
 	`, uploadResult.URL, time.Now(), userID)
-
 	if err != nil {
-		log.Printf("Erro ao salvar URL no banco: %v", err)
+		log.Printf("UploadUserAvatar save: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erro ao atualizar o perfil"})
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"success":   true,
-		"avatarUrl": uploadResult.URL,
-	})
+	c.JSON(http.StatusOK, gin.H{"success": true, "avatarUrl": uploadResult.URL})
 }

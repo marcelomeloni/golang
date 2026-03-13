@@ -15,8 +15,6 @@ const (
 	pixExpiresInSec = 900
 )
 
-// ── Request / Response DTOs ───────────────────────────────────────────────────
-
 type abacateCustomer struct {
 	Name      string `json:"name"`
 	Cellphone string `json:"cellphone"`
@@ -25,10 +23,10 @@ type abacateCustomer struct {
 }
 
 type abacateCreateRequest struct {
-	Amount      int              `json:"amount"`             // centavos
+	Amount      int              `json:"amount"`
 	ExpiresIn   int              `json:"expiresIn"`
 	Description string           `json:"description,omitempty"`
-	Customer    *abacateCustomer `json:"customer,omitempty"` // nil → omitido no JSON
+	Customer    *abacateCustomer `json:"customer,omitempty"`
 	Metadata    map[string]any   `json:"metadata,omitempty"`
 }
 
@@ -51,14 +49,29 @@ type abacateCheckResponse struct {
 	Error any `json:"error"`
 }
 
-// ── Gateway ───────────────────────────────────────────────────────────────────
+type abacateWithdrawPixData struct {
+	Key  string `json:"key"`
+	Type string `json:"type"`
+}
+
+type abacateWithdrawRequest struct {
+	ExternalID  string                 `json:"externalId"`
+	Method      string                 `json:"method"`
+	Amount      int                    `json:"amount"`
+	Pix         abacateWithdrawPixData `json:"pix"`
+	Description string                 `json:"description,omitempty"`
+}
+
+type abacateWithdrawResponse struct {
+	Data  any `json:"data"`
+	Error any `json:"error"`
+}
 
 type abacateGateway struct {
 	apiKey     string
 	httpClient *http.Client
 }
 
-// NewAbacatePay retorna um Gateway configurado para o AbacatePay.
 func NewAbacatePay(apiKey string) Gateway {
 	return &abacateGateway{
 		apiKey:     apiKey,
@@ -66,9 +79,6 @@ func NewAbacatePay(apiKey string) Gateway {
 	}
 }
 
-// GeneratePix cria um QRCode Pix no AbacatePay.
-// O objeto customer só é enviado quando name, email e cpf estão presentes —
-// a API exige todos os 4 campos ou nenhum.
 func (g *abacateGateway) GeneratePix(
 	orderID string,
 	amountBRL float64,
@@ -83,7 +93,7 @@ func (g *abacateGateway) GeneratePix(
 	if buyerName != "" && buyerEmail != "" && buyerCPF != "" {
 		phone := strings.TrimSpace(buyerPhone)
 		if phone == "" {
-			phone = "(00) 00000-0000" // placeholder: API exige o campo mas não valida o número
+			phone = "(00) 00000-0000"
 		}
 		payload.Customer = &abacateCustomer{
 			Name:      buyerName,
@@ -113,7 +123,6 @@ func (g *abacateGateway) GeneratePix(
 	}, nil
 }
 
-// CheckStatus consulta o status atual de uma cobrança Pix pelo ID externo.
 func (g *abacateGateway) CheckStatus(externalID string) (string, error) {
 	url := fmt.Sprintf("%s/pixQrCode/check?id=%s", abacateBaseURL, externalID)
 
@@ -148,7 +157,36 @@ func (g *abacateGateway) CheckStatus(externalID string) (string, error) {
 	return parsed.Data.Status, nil
 }
 
-// ── helpers ───────────────────────────────────────────────────────────────────
+// Withdraw envia um pagamento PIX ao vendedor.
+// pixKeyType deve ser um dos valores: cpf, email, phone, random
+// A API do AbacatePay exige o type em uppercase: CPF, EMAIL, PHONE, RANDOM
+func (g *abacateGateway) Withdraw(referenceID string, amountBRL float64, pixKey string, pixKeyType string) error {
+	payload := abacateWithdrawRequest{
+		ExternalID:  fmt.Sprintf("withdraw-%s", referenceID),
+		Method:      "PIX",
+		Amount:      int(amountBRL * 100),
+		Pix: abacateWithdrawPixData{
+			Key:  pixKey,
+			Type: strings.ToUpper(pixKeyType),
+		},
+		Description: fmt.Sprintf("Reppy Market - venda %s", referenceID),
+	}
+
+	respData, err := g.post("/withdraw/create", payload)
+	if err != nil {
+		return fmt.Errorf("abacatepay withdraw: %w", err)
+	}
+
+	var parsed abacateWithdrawResponse
+	if err := json.Unmarshal(respData, &parsed); err != nil {
+		return fmt.Errorf("abacatepay withdraw parse: %w", err)
+	}
+	if parsed.Error != nil {
+		return fmt.Errorf("abacatepay withdraw api error: %v", parsed.Error)
+	}
+
+	return nil
+}
 
 func (g *abacateGateway) post(path string, body any) ([]byte, error) {
 	data, err := json.Marshal(body)

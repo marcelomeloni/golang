@@ -21,8 +21,8 @@ type abacateWebhookPayload struct {
 
 type abacateBillingData struct {
 	PixQrCode struct {
-		ID       string `json:"id"`
-		Status   string `json:"status"`
+		ID     string `json:"id"`
+		Status string `json:"status"`
 		Metadata struct {
 			OrderID string `json:"order_id"`
 		} `json:"metadata"`
@@ -84,7 +84,7 @@ func handleBillingPaid(c *gin.Context, db *sql.DB, raw json.RawMessage) {
 		log.Printf("handleBillingPaid: metadata.order_id vazio — tentando fallback por pix_external_id=%q", data.PixQrCode.ID)
 
 		if data.PixQrCode.ID == "" {
-			log.Printf("handleBillingPaid: ATENÇÃO — pixQrCode.ID também vazio, struct pode estar deserializando errado (checar se o payload usa wrapper 'pixQrCode' ou não)")
+			log.Printf("handleBillingPaid: ATENÇÃO — pixQrCode.ID também vazio, struct pode estar deserializando errado")
 			c.Status(http.StatusOK)
 			return
 		}
@@ -197,6 +197,15 @@ func handleBillingRefunded(c *gin.Context, db *sql.DB, raw json.RawMessage) {
 	c.Status(http.StatusOK)
 }
 
+// processMarketTransactionIfExists cria o ticket do comprador, transfere o ingresso
+// e credita o saldo do vendedor — tudo após o pagamento ser confirmado.
+//
+// Operações em transação única:
+//  1. Cria um novo ticket (valid) para o comprador
+//  2. Invalida o ticket original do vendedor (transferred)
+//  3. Fecha o listing (sold)
+//  4. Registra o new_ticket_id, move escrow para 'held' e popula held_at
+//  5. Credita market_balance do vendedor com o valor líquido
 func processMarketTransactionIfExists(db *sql.DB, orderID string) {
 	log.Printf("processMarketTransaction: iniciando para orderID=%s", orderID)
 
@@ -206,16 +215,20 @@ func processMarketTransactionIfExists(db *sql.DB, orderID string) {
 		oldTicketID string
 		buyerID     sql.NullString
 		batchID     string
+		sellerID    string
+		amount      float64
+		platformFee float64
 	)
 
 	err := db.QueryRow(`
-		SELECT mt.id, mt.listing_id, ml.ticket_id, mt.buyer_id, t.batch_id
+		SELECT mt.id, mt.listing_id, ml.ticket_id, mt.buyer_id, t.batch_id,
+		       ml.seller_id, mt.amount, mt.platform_fee
 		FROM market_transactions mt
 		JOIN market_listings ml ON ml.id = mt.listing_id
 		JOIN tickets t ON t.id = ml.ticket_id
 		WHERE mt.order_id = $1
 		  AND mt.escrow_status = 'pending'
-	`, orderID).Scan(&txID, &listingID, &oldTicketID, &buyerID, &batchID)
+	`, orderID).Scan(&txID, &listingID, &oldTicketID, &buyerID, &batchID, &sellerID, &amount, &platformFee)
 
 	if err == sql.ErrNoRows {
 		log.Printf("processMarketTransaction: nenhuma market_transaction pending para orderID=%s — pedido normal, ignorando", orderID)
@@ -226,8 +239,8 @@ func processMarketTransactionIfExists(db *sql.DB, orderID string) {
 		return
 	}
 
-	log.Printf("processMarketTransaction: txID=%s listingID=%s oldTicketID=%s buyerID=%v batchID=%s",
-		txID, listingID, oldTicketID, buyerID, batchID)
+	log.Printf("processMarketTransaction: txID=%s listingID=%s oldTicketID=%s buyerID=%v batchID=%s sellerID=%s",
+		txID, listingID, oldTicketID, buyerID, batchID, sellerID)
 
 	newQR, err := orderservice.GenerateQRCode()
 	if err != nil {
@@ -275,13 +288,25 @@ func processMarketTransactionIfExists(db *sql.DB, orderID string) {
 
 	if _, err := sqlTx.Exec(`
 		UPDATE market_transactions
-		SET escrow_status = 'held', new_ticket_id = $1
+		SET escrow_status = 'held', new_ticket_id = $1, held_at = NOW()
 		WHERE id = $2
 	`, newTicketID, txID); err != nil {
 		log.Printf("processMarketTransaction: update escrow orderID=%s: %v", orderID, err)
 		return
 	}
 	log.Printf("processMarketTransaction: escrow -> held txID=%s", txID)
+
+	// Credita o saldo do vendedor com o valor líquido (após taxa da plataforma)
+	netAmount := amount - platformFee
+	if _, err := sqlTx.Exec(`
+		UPDATE users
+		SET market_balance = market_balance + $1
+		WHERE id = $2
+	`, netAmount, sellerID); err != nil {
+		log.Printf("processMarketTransaction: update market_balance sellerID=%s: %v", sellerID, err)
+		return
+	}
+	log.Printf("processMarketTransaction: market_balance += %.2f sellerID=%s ✓", netAmount, sellerID)
 
 	if err := sqlTx.Commit(); err != nil {
 		log.Printf("processMarketTransaction: commit orderID=%s: %v", orderID, err)
@@ -292,6 +317,8 @@ func processMarketTransactionIfExists(db *sql.DB, orderID string) {
 		orderID, txID, newTicketID)
 }
 
+// cancelMarketTransactionIfExists reabre o listing quando o pagamento é reembolsado.
+// Deve ser chamado dentro de uma transação já aberta.
 func cancelMarketTransactionIfExists(tx *sql.Tx, orderID string) {
 	var listingID string
 
