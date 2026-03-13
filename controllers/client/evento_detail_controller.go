@@ -19,9 +19,9 @@ import (
 // ==========================================
 
 type EventDetailResponse struct {
-	Event        EventData     `json:"event"`
-	OfficialLots []OfficialLot `json:"officialLots"`
-	MarketLots   []MarketLot   `json:"marketLots"`
+	Event      EventData          `json:"event"`
+	Categories []OfficialCategory `json:"categories"`
+	MarketLots []MarketLot        `json:"marketLots"`
 }
 
 type EventData struct {
@@ -64,22 +64,33 @@ type PlatformFee struct {
 	Fixed      float64 `json:"fixed"`
 }
 
+// OfficialCategory agrupa os lotes de uma mesma categoria
+type OfficialCategory struct {
+	ID          string        `json:"id"`
+	Name        string        `json:"name"`
+	Type        string        `json:"type"`
+	Description string        `json:"description"`
+	Lots        []OfficialLot `json:"lots"`
+}
+
 type OfficialLot struct {
 	ID                string  `json:"id"`
 	Title             string  `json:"title"`
 	Subtitle          string  `json:"subtitle"`
 	Price             float64 `json:"price"`
 	FeePayer          string  `json:"feePayer"`
-	FeePercentage     float64 `json:"feePercentage"` // taxa específica deste lote (ex: 0.07)
+	FeePercentage     float64 `json:"feePercentage"`
 	Available         bool    `json:"available"`
 	UnavailableReason string  `json:"unavailableReason,omitempty"`
 }
 
 type MarketLot struct {
-	ID       string  `json:"id"`
-	Title    string  `json:"title"`
-	Subtitle string  `json:"subtitle"`
-	Price    float64 `json:"price"`
+	ID           string  `json:"id"`
+	Title        string  `json:"title"`
+	Subtitle     string  `json:"subtitle"`
+	CategoryName string  `json:"categoryName"`
+	Price        float64 `json:"price"`
+	SellerID     string  `json:"sellerId"`
 }
 
 // ==========================================
@@ -246,74 +257,119 @@ func GetEventDetail(c *gin.Context) {
 	}
 
 	// ------------------------------------------------------------------
-	// 2. LOTES OFICIAIS — feePercentage calculado por lote via feehelper
+	// 2. LOTES OFICIAIS — agrupados por categoria, ordenados por posição
 	// ------------------------------------------------------------------
 	queryOfficial := `
 		SELECT
-			id,
-			name,
-			COALESCE(description, ''),
-			price,
-			COALESCE(fee_payer, 'buyer'),
+			tb.id,
+			tb.name,
+			COALESCE(tb.description, ''),
+			tb.price,
+			COALESCE(tb.fee_payer, 'buyer'),
 			(
-				status = 'active'
-				AND (start_date IS NULL OR start_date <= NOW())
-				AND (end_date IS NULL OR end_date > NOW())
-				AND quantity_sold < quantity_total
+				tb.status = 'active'
+				AND (tb.start_date IS NULL OR tb.start_date <= NOW())
+				AND (tb.end_date   IS NULL OR tb.end_date   >  NOW())
+				AND tb.quantity_sold < tb.quantity_total
 			) AS available,
 			CASE
-				WHEN quantity_sold >= quantity_total               THEN 'sold_out'
-				WHEN end_date IS NOT NULL AND end_date <= NOW()    THEN 'expired'
-				WHEN start_date IS NOT NULL AND start_date > NOW() THEN 'not_started'
+				WHEN tb.quantity_sold >= tb.quantity_total                  THEN 'sold_out'
+				WHEN tb.end_date   IS NOT NULL AND tb.end_date   <= NOW()   THEN 'expired'
+				WHEN tb.start_date IS NOT NULL AND tb.start_date >  NOW()   THEN 'not_started'
 				ELSE ''
-			END AS unavailable_reason
-		FROM ticket_batches
-		WHERE event_id = $1
-		ORDER BY price ASC;
+			END AS unavailable_reason,
+			COALESCE(tc.id::text, ''),
+			COALESCE(tc.name, 'Geral'),
+			COALESCE(tc.type, ''),
+			COALESCE(tc.description, ''),
+			COALESCE(tc.position, 9999)
+		FROM ticket_batches tb
+		LEFT JOIN ticket_categories tc ON tc.id = tb.category_id
+		WHERE tb.event_id = $1
+		ORDER BY COALESCE(tc.position, 9999) ASC, tb.price ASC;
 	`
+
 	rowsOfficial, err := db.Query(queryOfficial, id)
-	var officialLots []OfficialLot
+
+	// slice para preservar a ordem de aparição das categorias
+	categoryOrder := []string{}
+	categoryMap := map[string]*OfficialCategory{}
+
 	if err == nil {
 		defer rowsOfficial.Close()
 		for rowsOfficial.Next() {
 			var l OfficialLot
+			var catID, catName, catType, catDesc string
+			var catPosition int
+
 			if err := rowsOfficial.Scan(
 				&l.ID, &l.Title, &l.Subtitle, &l.Price, &l.FeePayer,
 				&l.Available, &l.UnavailableReason,
+				&catID, &catName, &catType, &catDesc, &catPosition,
 			); err != nil {
 				log.Printf("GetEventDetail scan lot: %v", err)
 				continue
 			}
+
 			// Calcula a taxa correta para este lote específico
 			if l.FeePayer == "buyer" && l.Price > 0 {
 				l.FeePercentage = feehelper.CalcFee(l.Price, promoFee).FeePercentage
 			}
-			officialLots = append(officialLots, l)
+
+			// Cria a categoria na primeira aparição, preservando a ordem
+			if _, exists := categoryMap[catID]; !exists {
+				categoryMap[catID] = &OfficialCategory{
+					ID:          catID,
+					Name:        catName,
+					Type:        catType,
+					Description: catDesc,
+					Lots:        []OfficialLot{},
+				}
+				categoryOrder = append(categoryOrder, catID)
+			}
+			categoryMap[catID].Lots = append(categoryMap[catID].Lots, l)
 		}
 	} else {
 		log.Printf("GetEventDetail officialLots: %v", err)
 	}
 
+	// Converte mapa → slice respeitando a ordem original
+	categories := make([]OfficialCategory, 0, len(categoryOrder))
+	for _, cid := range categoryOrder {
+		categories = append(categories, *categoryMap[cid])
+	}
+
 	// ------------------------------------------------------------------
-	// 3. REPPY MARKET — apenas listings ativos com ticket válido
+	// 3. REPPY MARKET — somente categorias com in_reppy_market = true
 	// ------------------------------------------------------------------
 	queryMarket := `
-		SELECT m.id, tb.name, COALESCE(tb.description, ''), m.price
+		SELECT
+			m.id,
+			tb.name,
+			COALESCE(tb.description, ''),
+			tc.name AS category_name,
+			m.price,
+			m.seller_id
 		FROM market_listings m
-		JOIN tickets t         ON m.ticket_id = t.id
-		JOIN ticket_batches tb ON t.batch_id  = tb.id
+		JOIN tickets           t  ON m.ticket_id = t.id
+		JOIN ticket_batches    tb ON t.batch_id   = tb.id
+		JOIN ticket_categories tc ON tc.id        = tb.category_id
 		WHERE m.event_id = $1
-		  AND m.status = 'active'
-		  AND t.status = 'valid'
+		  AND m.status   = 'active'
+		  AND t.status   = 'valid'
+		  AND tc.in_reppy_market = true
 		ORDER BY m.price ASC;
 	`
+
 	rowsMarket, err := db.Query(queryMarket, id)
 	var marketLots []MarketLot
 	if err == nil {
 		defer rowsMarket.Close()
 		for rowsMarket.Next() {
 			var m MarketLot
-			if err := rowsMarket.Scan(&m.ID, &m.Title, &m.Subtitle, &m.Price); err != nil {
+			if err := rowsMarket.Scan(
+				&m.ID, &m.Title, &m.Subtitle, &m.CategoryName, &m.Price, &m.SellerID,
+			); err != nil {
 				log.Printf("GetEventDetail scan market: %v", err)
 				continue
 			}
@@ -323,16 +379,16 @@ func GetEventDetail(c *gin.Context) {
 		log.Printf("GetEventDetail marketLots: %v", err)
 	}
 
-	if officialLots == nil {
-		officialLots = []OfficialLot{}
+	if categories == nil {
+		categories = []OfficialCategory{}
 	}
 	if marketLots == nil {
 		marketLots = []MarketLot{}
 	}
 
 	c.JSON(http.StatusOK, EventDetailResponse{
-		Event:        eventData,
-		OfficialLots: officialLots,
-		MarketLots:   marketLots,
+		Event:      eventData,
+		Categories: categories,
+		MarketLots: marketLots,
 	})
 }
