@@ -14,12 +14,11 @@ type GuestInfo struct {
 	CPF   string
 }
 
-// BatchInfo contém os dados de um lote de ingressos.
 type BatchInfo struct {
 	ID            string
 	Price         float64
 	FeePayer      string
-	Type          string // "paid" | "free" | "donation"
+	Type          string
 	Status        string
 	QuantityTotal int
 	QuantitySold  int
@@ -27,13 +26,11 @@ type BatchInfo struct {
 	MaxPurchase   int
 }
 
-// OrderItem é o item canônico do pedido (já validado).
 type OrderItem struct {
 	LotID string
 	Qty   int
 }
 
-// OrderResult é retornado após a criação do pedido.
 type OrderResult struct {
 	OrderID       string
 	PaymentMethod string
@@ -41,13 +38,11 @@ type OrderResult struct {
 	AllFree       bool
 }
 
-// ConflictInfo é preenchido quando o guest não pode ser criado por conflito de CPF ou e-mail.
 type ConflictInfo struct {
-	Code        string // "cpf_already_exists" | "email_already_exists"
+	Code        string
 	MaskedEmail string
 }
 
-// LoadBatches busca os lotes no banco para os IDs informados dentro do evento.
 func LoadBatches(db *sql.DB, eventID string, lotIDs []string) (map[string]BatchInfo, error) {
 	placeholders := make([]string, len(lotIDs))
 	args := make([]interface{}, len(lotIDs)+1)
@@ -58,14 +53,14 @@ func LoadBatches(db *sql.DB, eventID string, lotIDs []string) (map[string]BatchI
 	}
 
 	rows, err := db.Query(fmt.Sprintf(`
-    SELECT id, price, fee_payer, type, status,
-           quantity_total, quantity_sold, min_purchase, max_purchase
-    FROM ticket_batches
-    WHERE event_id = $1
-      AND id IN (%s)
-      AND status = 'active'
-      AND (start_date IS NULL OR start_date <= NOW())
-      AND (end_date IS NULL OR end_date > NOW())`,
+		SELECT id, price, fee_payer, type, status,
+		       quantity_total, quantity_sold, min_purchase, max_purchase
+		FROM ticket_batches
+		WHERE event_id = $1
+		  AND id IN (%s)
+		  AND status = 'active'
+		  AND (start_date IS NULL OR start_date <= NOW())
+		  AND (end_date IS NULL OR end_date > NOW())`,
 		strings.Join(placeholders, ",")), args...)
 	if err != nil {
 		return nil, err
@@ -84,8 +79,6 @@ func LoadBatches(db *sql.DB, eventID string, lotIDs []string) (map[string]BatchI
 	return batches, rows.Err()
 }
 
-// ValidateItems verifica disponibilidade e limites de compra para cada item.
-// Retorna uma mensagem de erro para o usuário (vazia = ok).
 func ValidateItems(batches map[string]BatchInfo, items []OrderItem) string {
 	for _, item := range items {
 		b, ok := batches[item.LotID]
@@ -106,7 +99,6 @@ func ValidateItems(batches map[string]BatchInfo, items []OrderItem) string {
 	return ""
 }
 
-// CalcSubtotal calcula o subtotal e indica se todos os itens são gratuitos.
 func CalcSubtotal(batches map[string]BatchInfo, items []OrderItem) (subtotal float64, allFree bool) {
 	allFree = true
 	for _, item := range items {
@@ -119,7 +111,6 @@ func CalcSubtotal(batches map[string]BatchInfo, items []OrderItem) (subtotal flo
 	return subtotal, allFree
 }
 
-// maskEmail mascara o e-mail para exibição: mar****cs@gm**.com
 func maskEmail(email string) string {
 	parts := strings.SplitN(email, "@", 2)
 	if len(parts) != 2 {
@@ -147,8 +138,32 @@ func maskEmail(email string) string {
 	return maskedLocal + "@" + maskedDomain
 }
 
-// ResolveUserID retorna o ID do usuário autenticado ou cria um guest.
-// Segundo retorno é um *ConflictInfo preenchido quando CPF ou e-mail já existem.
+func reuseOrConflict(db *sql.DB, field, value string) (sql.NullString, *ConflictInfo, error) {
+	var existingID string
+	var isGuest bool
+	var existingEmail string
+
+	err := db.QueryRow(fmt.Sprintf(`
+		SELECT id, is_guest, COALESCE(email, '') FROM users WHERE %s = $1
+	`, field), value).Scan(&existingID, &isGuest, &existingEmail)
+	if err != nil {
+		return sql.NullString{}, nil, fmt.Errorf("buscar usuário existente: %w", err)
+	}
+
+	if isGuest {
+		return sql.NullString{String: existingID, Valid: true}, nil, nil
+	}
+
+	conflictCode := "cpf_already_exists"
+	if field == "email" {
+		conflictCode = "email_already_exists"
+	}
+	return sql.NullString{}, &ConflictInfo{
+		Code:        conflictCode,
+		MaskedEmail: maskEmail(existingEmail),
+	}, nil
+}
+
 func ResolveUserID(db *sql.DB, contextUserID string, guest *GuestInfo) (sql.NullString, *ConflictInfo, error) {
 	if contextUserID != "" {
 		return sql.NullString{String: contextUserID, Valid: true}, nil, nil
@@ -178,29 +193,20 @@ func ResolveUserID(db *sql.DB, contextUserID string, guest *GuestInfo) (sql.Null
 		email, name, cpf,
 	).Scan(&guestID)
 
-	if err != nil {
-		if strings.Contains(err.Error(), "users_cpf_key") {
-			var existingEmail string
-			_ = db.QueryRow(`SELECT COALESCE(email, '') FROM users WHERE cpf = $1`, cpf.String).Scan(&existingEmail)
-			return sql.NullString{}, &ConflictInfo{
-				Code:        "cpf_already_exists",
-				MaskedEmail: maskEmail(existingEmail),
-			}, nil
-		}
-		if strings.Contains(err.Error(), "users_email_key") {
-			return sql.NullString{}, &ConflictInfo{
-				Code:        "email_already_exists",
-				MaskedEmail: maskEmail(email.String),
-			}, nil
-		}
-		return sql.NullString{}, nil, fmt.Errorf("criar usuário guest: %w", err)
+	if err == nil {
+		return sql.NullString{String: guestID, Valid: true}, nil, nil
 	}
 
-	return sql.NullString{String: guestID, Valid: true}, nil, nil
+	if strings.Contains(err.Error(), "users_cpf_key") {
+		return reuseOrConflict(db, "cpf", cpf.String)
+	}
+	if strings.Contains(err.Error(), "users_email_key") {
+		return reuseOrConflict(db, "email", email.String)
+	}
+
+	return sql.NullString{}, nil, fmt.Errorf("criar usuário guest: %w", err)
 }
 
-// Persist salva o pedido e os ingressos dentro de uma transação.
-// O trigger check_batch_capacity no banco incrementa quantity_sold automaticamente.
 func Persist(
 	tx *sql.Tx,
 	eventID string,
