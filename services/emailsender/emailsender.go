@@ -7,28 +7,26 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"time"
 )
 
-const resendAPI = "https://api.resend.com/emails"
+const (
+	resendAPI        = "https://api.resend.com/emails"
+	sendRatePerSec   = 2
+	rateLimitPause   = time.Second
+)
 
-// ──────────────────────────────────────────────
-// Tipos públicos
-// ──────────────────────────────────────────────
-
-// Recipient representa um destinatário de e-mail.
 type Recipient struct {
 	Name  string
 	Email string
 }
 
-// Attachment representa um arquivo anexado ao e-mail.
 type Attachment struct {
 	Filename    string
-	Content     []byte // bytes brutos — será codificado em base64 internamente
-	ContentType string // ex: "application/pdf"
+	Content     []byte
+	ContentType string
 }
 
-// Message contém tudo necessário para enviar um e-mail.
 type Message struct {
 	From        string
 	To          []Recipient
@@ -38,28 +36,20 @@ type Message struct {
 	Attachments []Attachment
 }
 
-// Result é retornado após o envio bem-sucedido de cada e-mail.
 type Result struct {
 	ID    string
 	Email string
 }
 
-// Sender é a interface que o resto da aplicação usa.
-// Facilita mock em testes e troca de provider no futuro.
 type Sender interface {
 	Send(msg Message) ([]Result, error)
 }
-
-// ──────────────────────────────────────────────
-// Implementação Resend
-// ──────────────────────────────────────────────
 
 type resendSender struct {
 	apiKey string
 	client *http.Client
 }
 
-// New cria um Sender via Resend. Se apiKey for vazio, lê RESEND_API_KEY do env.
 func New(apiKey string) Sender {
 	if apiKey == "" {
 		apiKey = os.Getenv("RESEND_API_KEY")
@@ -67,7 +57,6 @@ func New(apiKey string) Sender {
 	return &resendSender{apiKey: apiKey, client: &http.Client{}}
 }
 
-// Send envia para cada destinatário individualmente, permitindo personalização por pessoa.
 func (s *resendSender) Send(msg Message) ([]Result, error) {
 	if len(msg.To) == 0 {
 		return nil, fmt.Errorf("emailsender: nenhum destinatário informado")
@@ -76,7 +65,11 @@ func (s *resendSender) Send(msg Message) ([]Result, error) {
 	results := make([]Result, 0, len(msg.To))
 	var lastErr error
 
-	for _, r := range msg.To {
+	for i, r := range msg.To {
+		if i > 0 && i%sendRatePerSec == 0 {
+			time.Sleep(rateLimitPause)
+		}
+
 		html := applyVariables(msg.HTMLBody, r, msg.Variables)
 
 		payload := map[string]interface{}{
@@ -134,11 +127,6 @@ func (s *resendSender) post(payload map[string]interface{}) (string, error) {
 	return body.ID, nil
 }
 
-// ──────────────────────────────────────────────
-// Helpers
-// ──────────────────────────────────────────────
-
-// buildAttachments converte []Attachment para o formato esperado pela API do Resend.
 func buildAttachments(attachments []Attachment) []map[string]string {
 	out := make([]map[string]string, len(attachments))
 	for i, a := range attachments {
@@ -150,7 +138,6 @@ func buildAttachments(attachments []Attachment) []map[string]string {
 	return out
 }
 
-// applyVariables substitui {{NOME}}, {{EMAIL}} e as chaves de vars no HTML.
 func applyVariables(html string, r Recipient, vars map[string]string) string {
 	result := bytes.ReplaceAll([]byte(html), []byte("{{NOME}}"), []byte(r.Name))
 	result = bytes.ReplaceAll(result, []byte("{{EMAIL}}"), []byte(r.Email))

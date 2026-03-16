@@ -64,7 +64,7 @@ func Register(r *gin.Engine) {
 
 		auth.GET("/org/:slug/events/:id/cancellations",              controllers.GetCancellationsHandler)
 		auth.PATCH("/org/:slug/events/:id/cancellations/:refundID",  controllers.PatchRefundHandler)
-
+		auth.POST("/org/:slug/events/:id/comunicados",           controllers.SendComunicadoHandler)
 		auth.GET("/org/:slug/events/:id/participants",              controllers.GetParticipantsHandler)
 		auth.GET("/org/:slug/events/:id/comunicados/recipients",    controllers.GetComunicadosRecipientsHandler)
 	}

@@ -45,8 +45,10 @@ func Register(r *gin.Engine) {
 			authed.PATCH("/market/listings/:listingId", client.UpdateMarketListing)
 			authed.DELETE("/market/listings/:listingId",client.DeleteMarketListing)
 
-			authed.GET("/market/my-sales",                 client.GetMySales)
-			authed.POST("/market/withdraw/:transactionId", client.WithdrawSale)
+			authed.GET("/market/my-sales",  client.GetMySales)
+			
+			// === ROTA ATUALIZADA (Lote/Batch) ===
+			authed.POST("/market/withdraw", client.WithdrawBalance) 
 
 			authed.GET("/radar/events/:eventId",                      client.GetRadarProfiles)
 			authed.GET("/radar/events/:eventId/mode",                 client.GetRadarMode)

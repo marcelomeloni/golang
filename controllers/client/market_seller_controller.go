@@ -26,6 +26,12 @@ type MySaleItem struct {
 	HeldAt        string  `json:"heldAt"`
 }
 
+type SalesSummary struct {
+	TotalWithdrawable float64 `json:"totalWithdrawable"`
+	TotalPending      float64 `json:"totalPending"`
+	TotalReleased     float64 `json:"totalReleased"`
+}
+
 func GetMySales(c *gin.Context) {
 	userID, _ := c.Get("userID")
 	userIDStr, _ := userID.(string)
@@ -38,7 +44,7 @@ func GetMySales(c *gin.Context) {
 
 	rows, err := db.Query(`
 		WITH ranked AS (
-			SELECT
+			SELECT 
 				mt.id,
 				e.title        AS event_title,
 				e.start_date   AS event_date,
@@ -50,7 +56,7 @@ func GetMySales(c *gin.Context) {
 				mt.created_at,
 				ROW_NUMBER() OVER (
 					PARTITION BY mt.listing_id
-					ORDER BY
+					ORDER BY 
 						CASE mt.escrow_status
 							WHEN 'held'     THEN 1
 							WHEN 'released' THEN 2
@@ -67,12 +73,13 @@ func GetMySales(c *gin.Context) {
 			WHERE ml.seller_id = $1
 			  AND mt.escrow_status NOT IN ('cancelled', 'refunded')
 		)
-		SELECT id, event_title, event_date, lot_title,
+		SELECT id, event_title, event_date, lot_title, 
 		       amount, platform_fee, escrow_status, held_at
 		FROM ranked
 		WHERE rn = 1
 		ORDER BY created_at DESC
 	`, userIDStr)
+	
 	if err != nil {
 		log.Printf("GetMySales query: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "erro interno"})
@@ -81,6 +88,8 @@ func GetMySales(c *gin.Context) {
 	defer rows.Close()
 
 	sales := []MySaleItem{}
+	summary := SalesSummary{}
+
 	for rows.Next() {
 		var (
 			txID         string
@@ -93,7 +102,7 @@ func GetMySales(c *gin.Context) {
 			heldAt       sql.NullTime
 		)
 
-		if err := rows.Scan(&txID, &eventTitle, &eventDate, &lotTitle,
+		if err := rows.Scan(&txID, &eventTitle, &eventDate, &lotTitle, 
 			&amount, &platformFee, &escrowStatus, &heldAt); err != nil {
 			log.Printf("GetMySales scan: %v", err)
 			continue
@@ -105,6 +114,15 @@ func GetMySales(c *gin.Context) {
 		heldAtStr := ""
 		if heldAt.Valid {
 			heldAtStr = heldAt.Time.Format(time.RFC3339)
+		}
+
+		// Popula o resumo financeiro para a UI
+		if escrowStatus == "released" {
+			summary.TotalReleased += netAmount
+		} else if canWithdraw {
+			summary.TotalWithdrawable += netAmount
+		} else if escrowStatus == "held" || escrowStatus == "pending" {
+			summary.TotalPending += netAmount
 		}
 
 		sales = append(sales, MySaleItem{
@@ -122,12 +140,14 @@ func GetMySales(c *gin.Context) {
 		})
 	}
 
-	c.JSON(http.StatusOK, gin.H{"sales": sales})
+	c.JSON(http.StatusOK, gin.H{
+		"summary": summary,
+		"sales":   sales,
+	})
 }
 
-func WithdrawSale(c *gin.Context) {
-	transactionID := c.Param("transactionId")
-
+// WithdrawBalance saca TODAS as vendas elegíveis de uma só vez
+func WithdrawBalance(c *gin.Context) {
 	userID, _ := c.Get("userID")
 	userIDStr, _ := userID.(string)
 	if userIDStr == "" {
@@ -137,55 +157,12 @@ func WithdrawSale(c *gin.Context) {
 
 	db := config.GetDB()
 
-	var (
-		eventDate    time.Time
-		amount       float64
-		platformFee  float64
-		escrowStatus string
-		heldAt       sql.NullTime
-		pixKey       sql.NullString
-		pixKeyType   sql.NullString
-		sellerID     string
-	)
-
-	err := db.QueryRow(`
-		SELECT
-			e.start_date,
-			mt.amount,
-			mt.platform_fee,
-			mt.escrow_status,
-			mt.held_at,
-			u.pix_key,
-			u.pix_key_type,
-			ml.seller_id
-		FROM market_transactions mt
-		JOIN market_listings ml ON ml.id = mt.listing_id
-		JOIN events e           ON e.id  = ml.event_id
-		JOIN users u            ON u.id  = ml.seller_id
-		WHERE mt.id = $1
-	`, transactionID).Scan(
-		&eventDate, &amount, &platformFee, &escrowStatus, &heldAt,
-		&pixKey, &pixKeyType, &sellerID,
-	)
-
-	if err == sql.ErrNoRows {
-		c.JSON(http.StatusNotFound, gin.H{"error": "transação não encontrada"})
-		return
-	}
+	// 1. Verifica se o usuário tem chave PIX cadastrada
+	var pixKey, pixKeyType sql.NullString
+	err := db.QueryRow(`SELECT pix_key, pix_key_type FROM users WHERE id = $1`, userIDStr).Scan(&pixKey, &pixKeyType)
 	if err != nil {
-		log.Printf("WithdrawSale scan: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "erro interno"})
-		return
-	}
-
-	if sellerID != userIDStr {
-		c.JSON(http.StatusForbidden, gin.H{"error": "esta venda não pertence a você"})
-		return
-	}
-
-	canWithdraw, blockReason := evalWithdrawEligibility(escrowStatus, eventDate, heldAt)
-	if !canWithdraw {
-		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": blockReason})
+		log.Printf("WithdrawBalance user scan: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "erro interno ao buscar usuário"})
 		return
 	}
 
@@ -197,30 +174,103 @@ func WithdrawSale(c *gin.Context) {
 		return
 	}
 
-	netAmount := amount - platformFee
+	// 2. Busca todas as transações elegíveis para este usuário
+	rows, err := db.Query(`
+		SELECT 
+			mt.id,
+			mt.amount,
+			mt.platform_fee,
+			mt.escrow_status,
+			mt.held_at,
+			e.start_date
+		FROM market_transactions mt
+		JOIN market_listings ml ON ml.id = mt.listing_id
+		JOIN events e           ON e.id  = ml.event_id
+		WHERE ml.seller_id = $1
+		  AND mt.escrow_status = 'held'
+	`, userIDStr)
+	if err != nil {
+		log.Printf("WithdrawBalance query eligible: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao buscar saldo"})
+		return
+	}
+	defer rows.Close()
 
-	if err := paymentservice.Default.Withdraw(transactionID, netAmount, pixKey.String, pixKeyType.String); err != nil {
-		log.Printf("WithdrawSale payout transactionID=%s: %v", transactionID, err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao processar saque"})
+	var eligibleTransactionIDs []string
+	var totalPayout float64 = 0.0
+
+	// 3. Filtra via código para usar a mesma regra de negócio da visualização
+	for rows.Next() {
+		var txID string
+		var amount, platformFee float64
+		var escrowStatus string
+		var heldAt sql.NullTime
+		var eventDate time.Time
+
+		if err := rows.Scan(&txID, &amount, &platformFee, &escrowStatus, &heldAt, &eventDate); err != nil {
+			log.Printf("WithdrawBalance row scan: %v", err)
+			continue
+		}
+
+		canWithdraw, _ := evalWithdrawEligibility(escrowStatus, eventDate, heldAt)
+		if canWithdraw {
+			eligibleTransactionIDs = append(eligibleTransactionIDs, txID)
+			totalPayout += (amount - platformFee)
+		}
+	}
+
+	if len(eligibleTransactionIDs) == 0 || totalPayout <= 0 {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "nenhum saldo elegível para saque no momento"})
 		return
 	}
 
-	_, err = db.Exec(`
-		UPDATE market_transactions
-		SET escrow_status = 'released', released_at = NOW()
-		WHERE id = $1
-	`, transactionID)
+	// 4. Cria um ID único para este lote de pagamento (para os logs e gateway)
+	batchRefID := fmt.Sprintf("batch_withdraw_%s_%d", userIDStr, time.Now().Unix())
+
+	// 5. Executa o Payout no Gateway (UMA ÚNICA VEZ)
+	// Adapte o `Withdraw` caso ele precise do ID transacional, mandaremos o batchRefID
+	if err := paymentservice.Default.Withdraw(batchRefID, totalPayout, pixKey.String, pixKeyType.String); err != nil {
+		log.Printf("WithdrawBalance payout falhou para o lote %s: %v", batchRefID, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao processar saque com o banco"})
+		return
+	}
+
+	// 6. Atualiza todas as transações em uma única Transaction segura no DB
+	tx, err := db.Begin()
 	if err != nil {
-		log.Printf("WithdrawSale update escrow transactionID=%s: %v", transactionID, err)
+		log.Printf("WithdrawBalance db begin tx: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "saque processado, mas erro ao atualizar status"})
+		return
+	}
+
+	for _, id := range eligibleTransactionIDs {
+		_, err := tx.Exec(`
+			UPDATE market_transactions 
+			SET escrow_status = 'released', released_at = NOW() 
+			WHERE id = $1
+		`, id)
+		if err != nil {
+			log.Printf("WithdrawBalance tx update failed for id %s: %v", id, err)
+			tx.Rollback()
+			// Idealmente você tem uma fila de retentativas aqui se o banco cair, pois o PIX já foi enviado.
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "erro de consistência"})
+			return
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		log.Printf("WithdrawBalance tx commit: %v", err)
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"success":   true,
-		"netAmount": netAmount,
-		"pixKey":    pixKey.String,
+		"success":           true,
+		"withdrawnAmount":   totalPayout,
+		"transactionsCount": len(eligibleTransactionIDs),
+		"pixKey":            pixKey.String,
 	})
 }
 
+// As regras continuam intactas
 func evalWithdrawEligibility(escrowStatus string, eventDate time.Time, heldAt sql.NullTime) (bool, string) {
 	if escrowStatus == "released" {
 		return false, "saque já realizado"
@@ -234,10 +284,12 @@ func evalWithdrawEligibility(escrowStatus string, eventDate time.Time, heldAt sq
 
 	now := time.Now()
 
+	// Regra 1: Passou de 48h antes do evento
 	if time.Until(eventDate).Hours() < 48 {
 		return true, ""
 	}
 
+	// Regra 2: Passou de 7 dias desde a compra
 	if heldAt.Valid && now.Sub(heldAt.Time) >= 7*24*time.Hour {
 		return true, ""
 	}

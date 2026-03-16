@@ -1,5 +1,7 @@
 package client
 
+import "time"
+
 type MyTicketEvent struct {
 	Slug         string `json:"slug"`
 	Nome         string `json:"nome"`
@@ -29,6 +31,8 @@ type MyTicket struct {
 	IsListed          bool          `json:"isListed"`
 	ListingID         *string       `json:"listingId"`
 	ListingPrice      *float64      `json:"listingPrice"`
+	DaysUntil         *int          `json:"daysUntil"`
+	StartDateRaw      *time.Time    `json:"-"`
 	Evento            MyTicketEvent `json:"evento"`
 }
 

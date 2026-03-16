@@ -1,4 +1,3 @@
-// controllers/client/reppy_radar_controller.go
 package client
 
 import (
@@ -11,24 +10,25 @@ import (
 	"github.com/google/uuid"
 )
 
-// ==========================================
-// ESTRUTURAS
-// ==========================================
-
 type RadarProfile struct {
-	UserID     string `json:"userId"`
-	Name       string `json:"name"`
-	AvatarURL  string `json:"avatarUrl"`
-	Instagram  string `json:"instagram,omitempty"`
-	TappedByMe bool   `json:"tappedByMe"`
-	IsMutual   bool   `json:"isMutual"`
+	UserID    string `json:"userId"`
+	Name      string `json:"name"`
+	AvatarURL string `json:"avatarUrl"`
+	Instagram string `json:"instagram,omitempty"`
+	TappedByMe bool  `json:"tappedByMe"`
+	IsMutual   bool  `json:"isMutual"`
 }
 
-// ==========================================
-// HELPER — ELEGIBILIDADE
-// ==========================================
+type BlockedProfile struct {
+	UserID    string `json:"userId"`
+	Name      string `json:"name"`
+	AvatarURL string `json:"avatarUrl"`
+}
 
-// hasValidTicket verifica se o usuário possui ingresso válido e pago para o evento.
+type ToggleRadarRequest struct {
+	Enabled bool `json:"enabled"`
+}
+
 func hasValidTicket(db *sql.DB, userID, eventID string) (bool, error) {
 	var count int
 	err := db.QueryRow(`
@@ -41,17 +41,6 @@ func hasValidTicket(db *sql.DB, userID, eventID string) (bool, error) {
 		  AND o.status   = 'paid'
 	`, userID, eventID).Scan(&count)
 	return count > 0, err
-}
-
-// ==========================================
-// ATIVAR / DESATIVAR MODO RADAR
-// POST /events/:eventId/radar/mode
-// ==========================================
-// O usuário ativa/desativa o próprio Modo Radar para aquele evento.
-// Quem não ativa aparece invisível para os outros, mas pode ver normalmente.
-
-type ToggleRadarRequest struct {
-	Enabled bool `json:"enabled"`
 }
 
 func ToggleRadarMode(c *gin.Context) {
@@ -77,7 +66,6 @@ func ToggleRadarMode(c *gin.Context) {
 		return
 	}
 
-	// Atualiza apenas os ingressos do próprio usuário neste evento
 	_, err = db.Exec(`
 		UPDATE tickets
 		SET radar_enabled = $1
@@ -96,12 +84,6 @@ func ToggleRadarMode(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{"radarEnabled": req.Enabled})
 }
-
-// ==========================================
-// STATUS DO RADAR DO PRÓPRIO USUÁRIO
-// GET /events/:eventId/radar/mode
-// ==========================================
-// Retorna se o usuário atual está visível no radar deste evento.
 
 func GetRadarMode(c *gin.Context) {
 	userID, _ := c.Get("userID")
@@ -139,13 +121,6 @@ func GetRadarMode(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"radarEnabled": enabled})
 }
 
-// ==========================================
-// LISTAR PERFIS NO RADAR
-// GET /events/:eventId/radar
-// ==========================================
-// Retorna perfis com radar_enabled = true, excluindo bloqueios,
-// e anotando taps e mútuos do solicitante.
-
 func GetRadarProfiles(c *gin.Context) {
 	userID, _ := c.Get("userID")
 	eventID := c.Param("eventId")
@@ -164,19 +139,17 @@ func GetRadarProfiles(c *gin.Context) {
 	}
 
 	rows, err := db.Query(`
-		SELECT
+		SELECT DISTINCT ON (u.id)
 			u.id,
 			SPLIT_PART(u.full_name, ' ', 1)   AS first_name,
 			COALESCE(u.avatar_url, '')         AS avatar_url,
 			COALESCE(u.instagram,  '')         AS instagram,
-			-- tap dado pelo solicitante a este perfil
 			EXISTS (
 				SELECT 1 FROM radar_taps rt
 				WHERE rt.event_id     = $2
 				  AND rt.from_user_id = $1
 				  AND rt.to_user_id   = u.id
 			) AS tapped_by_me,
-			-- se o tap existe e é mútuo
 			COALESCE((
 				SELECT rt.is_mutual FROM radar_taps rt
 				WHERE rt.event_id     = $2
@@ -185,20 +158,19 @@ func GetRadarProfiles(c *gin.Context) {
 				LIMIT 1
 			), false) AS is_mutual
 		FROM tickets t
-		JOIN orders o ON o.id   = t.order_id
-		JOIN users  u ON u.id   = t.user_id
-		WHERE o.event_id        = $2
-		  AND o.status          = 'paid'
-		  AND t.status          = 'valid'
-		  AND t.radar_enabled   = true
-		  AND t.user_id        != $1
-		  -- exclui bloqueios em ambas as direções
+		JOIN orders o ON o.id  = t.order_id
+		JOIN users  u ON u.id  = t.user_id
+		WHERE o.event_id       = $2
+		  AND o.status         = 'paid'
+		  AND t.status         = 'valid'
+		  AND t.radar_enabled  = true
+		  AND t.user_id       != $1
 		  AND NOT EXISTS (
 		      SELECT 1 FROM radar_blocks rb
 		      WHERE (rb.blocker_user_id = $1 AND rb.blocked_user_id = u.id)
 		         OR (rb.blocker_user_id = u.id AND rb.blocked_user_id = $1)
 		  )
-		ORDER BY u.created_at DESC
+		ORDER BY u.id, u.created_at DESC
 	`, userID, eventID)
 	if err != nil {
 		log.Printf("GetRadarProfiles query: %v", err)
@@ -220,13 +192,6 @@ func GetRadarProfiles(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"profiles": profiles})
 }
 
-// ==========================================
-// TAP
-// POST /events/:eventId/radar/tap/:targetUserId
-// ==========================================
-// Registra um tap silencioso. Se o alvo já tapou de volta,
-// marca ambos como mútuos e sinaliza para o frontend disparar notificação.
-
 func TapUser(c *gin.Context) {
 	fromUserID, _ := c.Get("userID")
 	eventID := c.Param("eventId")
@@ -239,7 +204,6 @@ func TapUser(c *gin.Context) {
 
 	db := config.GetDB()
 
-	// Elegibilidade de quem tapa
 	eligible, err := hasValidTicket(db, fromUserID.(string), eventID)
 	if err != nil {
 		log.Printf("TapUser eligibility: %v", err)
@@ -251,7 +215,6 @@ func TapUser(c *gin.Context) {
 		return
 	}
 
-	// Verifica bloqueio entre os dois
 	var blocked int
 	db.QueryRow(`
 		SELECT COUNT(*) FROM radar_blocks
@@ -263,7 +226,6 @@ func TapUser(c *gin.Context) {
 		return
 	}
 
-	// Evita tap duplicado
 	var already int
 	db.QueryRow(`
 		SELECT COUNT(*) FROM radar_taps
@@ -276,18 +238,13 @@ func TapUser(c *gin.Context) {
 		return
 	}
 
-	// Verifica se o alvo já tapou o solicitante (tap reverso)
 	var reverseTapID string
-	reverseExists := false
-	err = db.QueryRow(`
+	reverseExists := db.QueryRow(`
 		SELECT id FROM radar_taps
 		WHERE event_id     = $1
 		  AND from_user_id = $2
 		  AND to_user_id   = $3
-	`, eventID, toUserID, fromUserID).Scan(&reverseTapID)
-	if err == nil {
-		reverseExists = true
-	}
+	`, eventID, toUserID, fromUserID).Scan(&reverseTapID) == nil
 
 	isMutual := reverseExists
 
@@ -298,7 +255,6 @@ func TapUser(c *gin.Context) {
 	}
 	defer tx.Rollback()
 
-	// Insere o tap do solicitante
 	_, err = tx.Exec(`
 		INSERT INTO radar_taps (id, event_id, from_user_id, to_user_id, is_mutual, created_at)
 		VALUES ($1, $2, $3, $4, $5, NOW())
@@ -309,12 +265,8 @@ func TapUser(c *gin.Context) {
 		return
 	}
 
-	// Se mútuo, atualiza o tap reverso também
 	if isMutual {
-		_, err = tx.Exec(`
-			UPDATE radar_taps SET is_mutual = true
-			WHERE id = $1
-		`, reverseTapID)
+		_, err = tx.Exec(`UPDATE radar_taps SET is_mutual = true WHERE id = $1`, reverseTapID)
 		if err != nil {
 			log.Printf("TapUser mutual update: %v", err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao confirmar match"})
@@ -327,16 +279,8 @@ func TapUser(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusCreated, gin.H{
-		"isMutual": isMutual,
-		// Frontend usa isMutual = true para exibir a notificação de match
-	})
+	c.JSON(http.StatusCreated, gin.H{"isMutual": isMutual})
 }
-
-// ==========================================
-// REMOVER TAP
-// DELETE /events/:eventId/radar/tap/:targetUserId
-// ==========================================
 
 func RemoveTap(c *gin.Context) {
 	fromUserID, _ := c.Get("userID")
@@ -352,7 +296,6 @@ func RemoveTap(c *gin.Context) {
 	}
 	defer tx.Rollback()
 
-	// Remove o tap
 	result, err := tx.Exec(`
 		DELETE FROM radar_taps
 		WHERE event_id     = $1
@@ -371,7 +314,6 @@ func RemoveTap(c *gin.Context) {
 		return
 	}
 
-	// Se havia match mútuo, desfaz o is_mutual no tap reverso
 	_, err = tx.Exec(`
 		UPDATE radar_taps SET is_mutual = false
 		WHERE event_id     = $1
@@ -392,13 +334,6 @@ func RemoveTap(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "tap removido"})
 }
 
-// ==========================================
-// BLOQUEAR USUÁRIO
-// POST /radar/block/:targetUserId
-// ==========================================
-// Bloqueia permanentemente — o alvo some do radar do solicitante
-// em qualquer evento, agora e no futuro.
-
 func BlockRadarUser(c *gin.Context) {
 	blockerID, _ := c.Get("userID")
 	blockedID := c.Param("targetUserId")
@@ -410,7 +345,6 @@ func BlockRadarUser(c *gin.Context) {
 
 	db := config.GetDB()
 
-	// Idempotente — ignora se já existe
 	_, err := db.Exec(`
 		INSERT INTO radar_blocks (id, blocker_user_id, blocked_user_id, created_at)
 		VALUES ($1, $2, $3, NOW())
@@ -424,11 +358,6 @@ func BlockRadarUser(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{"blocked": true})
 }
-
-// ==========================================
-// DESBLOQUEAR USUÁRIO
-// DELETE /radar/block/:targetUserId
-// ==========================================
 
 func UnblockRadarUser(c *gin.Context) {
 	blockerID, _ := c.Get("userID")
@@ -455,20 +384,14 @@ func UnblockRadarUser(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"blocked": false})
 }
 
-type BlockedProfile struct {
-	UserID    string `json:"userId"`
-	Name      string `json:"name"`
-	AvatarURL string `json:"avatarUrl"`
-}
-
 func GetBlockedUsers(c *gin.Context) {
 	userID, _ := c.Get("userID")
 	db := config.GetDB()
 
 	rows, err := db.Query(`
-		SELECT 
-			u.id, 
-			u.full_name, 
+		SELECT
+			u.id,
+			u.full_name,
 			COALESCE(u.avatar_url, '') AS avatar_url
 		FROM radar_blocks rb
 		JOIN users u ON u.id = rb.blocked_user_id
