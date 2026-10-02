@@ -66,7 +66,7 @@ func supabaseAnonKey() string {
 // ATENÇÃO: nunca expor no frontend. Usada apenas no servidor para
 // reconciliar contas já existentes durante o claim de guest.
 func supabaseServiceRoleKey() string {
-	return os.Getenv("SUPABASE_SERVICE_ROLE_KEY")
+	return os.Getenv("SUPABASE_SERVICE_KEY")
 }
 
 // supabaseAdminFindUserByEmail procura um usuário já existente no Supabase Auth.
