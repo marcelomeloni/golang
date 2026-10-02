@@ -143,8 +143,11 @@ func reuseOrConflict(db *sql.DB, field, value string) (sql.NullString, *Conflict
 	var isGuest bool
 	var existingEmail string
 
+	// lower() no lado da coluna: o índice único de e-mail é funcional
+	// (users_email_lower_key), então a comparação precisa ser case-insensitive
+	// para Kweedin@x.com e kweedin@x.com caírem na mesma conta.
 	err := db.QueryRow(fmt.Sprintf(`
-		SELECT id, is_guest, COALESCE(email, '') FROM users WHERE %s = $1
+		SELECT id, is_guest, COALESCE(email, '') FROM users WHERE lower(%s) = lower($1)
 	`, field), value).Scan(&existingID, &isGuest, &existingEmail)
 	if err != nil {
 		return sql.NullString{}, nil, fmt.Errorf("buscar usuário existente: %w", err)
@@ -177,7 +180,12 @@ func ResolveUserID(db *sql.DB, contextUserID string, guest *GuestInfo) (sql.Null
 			name = guest.Name
 		}
 		if guest.Email != "" {
-			email = sql.NullString{String: guest.Email, Valid: true}
+			// E-mail é a identidade da conta: sempre em minúsculas para
+			// não criar duplicatas (Kweedin@ vs kweedin@).
+			email = sql.NullString{
+				String: strings.ToLower(strings.TrimSpace(guest.Email)),
+				Valid:  true,
+			}
 		}
 		if guest.CPF != "" {
 			cleaned := strings.NewReplacer(".", "", "-", "").Replace(guest.CPF)
@@ -197,14 +205,24 @@ func ResolveUserID(db *sql.DB, contextUserID string, guest *GuestInfo) (sql.Null
 		return sql.NullString{String: guestID, Valid: true}, nil, nil
 	}
 
-	if strings.Contains(err.Error(), "users_cpf_key") {
+	// Detecção genérica de violação de unicidade: não depende do nome do
+	// índice, já que a unicidade de e-mail passa a ser garantida por um índice
+	// funcional em lower(email) (users_email_lower_key).
+	if isUniqueViolation(err.Error(), "cpf") {
 		return reuseOrConflict(db, "cpf", cpf.String)
 	}
-	if strings.Contains(err.Error(), "users_email_key") {
+	if isUniqueViolation(err.Error(), "email") {
 		return reuseOrConflict(db, "email", email.String)
 	}
 
 	return sql.NullString{}, nil, fmt.Errorf("criar usuário guest: %w", err)
+}
+
+func isUniqueViolation(errMsg, column string) bool {
+	if !strings.Contains(errMsg, "duplicate key value violates unique constraint") {
+		return false
+	}
+	return strings.Contains(errMsg, column)
 }
 
 func Persist(

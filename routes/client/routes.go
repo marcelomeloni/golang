@@ -12,7 +12,7 @@ func Register(r *gin.Engine) {
 		// === NOVO: cadastro e login ===
 		clientGroup.POST("/auth/register", client.Register)
 		clientGroup.POST("/auth/login", client.Login)
-		clientGroup.GET("/auth/check-guest", client.CheckGuest)
+		clientGroup.POST("/auth/check-guest", client.CheckGuest)
 		clientGroup.POST("/auth/claim-guest", client.ClaimGuest)
 
 		clientGroup.GET("/auth/profile/:userId", client.CheckProfile)

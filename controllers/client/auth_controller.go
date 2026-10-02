@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"bilheteria-api/config"
 	"github.com/gin-gonic/gin"
@@ -59,6 +60,101 @@ func supabaseURL() string {
 
 func supabaseAnonKey() string {
 	return os.Getenv("SUPABASE_ANON_KEY")
+}
+
+// supabaseServiceRoleKey — chave administrativa do Supabase.
+// ATENÇÃO: nunca expor no frontend. Usada apenas no servidor para
+// reconciliar contas já existentes durante o claim de guest.
+func supabaseServiceRoleKey() string {
+	return os.Getenv("SUPABASE_SERVICE_ROLE_KEY")
+}
+
+// supabaseAdminFindUserByEmail procura um usuário já existente no Supabase Auth.
+// O endpoint de listagem não aceita filtro por e-mail, então pagina até achar.
+func supabaseAdminFindUserByEmail(email string) (*supabaseUser, error) {
+	key := supabaseServiceRoleKey()
+	if key == "" {
+		return nil, fmt.Errorf("SUPABASE_SERVICE_ROLE_KEY não configurada")
+	}
+
+	target := strings.ToLower(strings.TrimSpace(email))
+
+	for page := 1; page <= 10; page++ {
+		url := fmt.Sprintf("%s/auth/v1/admin/users?page=%d&per_page=1000", supabaseURL(), page)
+
+		req, err := http.NewRequest(http.MethodGet, url, nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("apikey", key)
+		req.Header.Set("Authorization", "Bearer "+key)
+
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return nil, err
+		}
+
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+
+		if resp.StatusCode >= 400 {
+			return nil, fmt.Errorf("admin listUsers: %s", supabaseErrMessage(body))
+		}
+
+		var pageResp struct {
+			Users []supabaseUser `json:"users"`
+		}
+		if err := json.Unmarshal(body, &pageResp); err != nil {
+			return nil, err
+		}
+
+		for i := range pageResp.Users {
+			if strings.EqualFold(pageResp.Users[i].Email, target) {
+				return &pageResp.Users[i], nil
+			}
+		}
+
+		if len(pageResp.Users) < 1000 {
+			break
+		}
+	}
+
+	return nil, nil
+}
+
+// supabaseAdminSetPassword redefine a senha de uma conta existente e confirma
+// o e-mail. Usado no claim quando o e-mail já está cadastrado no Supabase.
+func supabaseAdminSetPassword(userID, password string) error {
+	key := supabaseServiceRoleKey()
+	if key == "" {
+		return fmt.Errorf("SUPABASE_SERVICE_ROLE_KEY não configurada")
+	}
+
+	b, _ := json.Marshal(map[string]interface{}{
+		"password":      password,
+		"email_confirm": true,
+	})
+
+	req, err := http.NewRequest(http.MethodPut, supabaseURL()+"/auth/v1/admin/users/"+userID, bytes.NewReader(b))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("apikey", key)
+	req.Header.Set("Authorization", "Bearer "+key)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("admin update user: %s", supabaseErrMessage(body))
+	}
+
+	return nil
 }
 
 // ==========================================
@@ -309,90 +405,84 @@ func Login(c *gin.Context) {
 // ==========================================
 
 type CheckGuestRequest struct {
-	Identifier string `form:"identifier" binding:"required"` // e-mail ou CPF
+	Email string `json:"email" binding:"required,email"`
+	CPF   string `json:"cpf"   binding:"required"`
 }
 
+// Resposta pública e mínima: sem CPF, sem e-mail e sem id.
 type CheckGuestResponse struct {
 	IsGuest    bool   `json:"isGuest"`
 	FullName   string `json:"fullName"`
-	Email      string `json:"email"`
-	CPF        string `json:"cpf"`
 	HasTickets bool   `json:"hasTickets"`
 }
 
+// guestNotFound responde sempre a mesma coisa, para não servir de oráculo
+// de enumeração: quem chamar não consegue distinguir "não existe" de
+// "existe, mas não é guest" ou "CPF não bate".
+func guestNotFound(c *gin.Context) {
+	c.JSON(http.StatusOK, CheckGuestResponse{IsGuest: false})
+}
+
+// CheckGuest — POST (não GET) para não vazar CPF/e-mail nos logs de acesso.
+// Exige e-mail E CPF do mesmo guest.
 func CheckGuest(c *gin.Context) {
 	var req CheckGuestRequest
-	if err := c.ShouldBindQuery(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "identifier é obrigatório"})
+	if err := c.ShouldBindJSON(&req); err != nil {
+		guestNotFound(c)
 		return
 	}
 
-	identifier := strings.TrimSpace(req.Identifier)
-	if identifier == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "identifier é obrigatório"})
+	email := strings.ToLower(strings.TrimSpace(req.Email))
+	cpfDigits, ok := cleanCPF(req.CPF)
+	if email == "" || !ok {
+		guestNotFound(c)
 		return
 	}
 
 	db := config.GetDB()
 
-	var query string
-	var args []interface{}
-
-	if strings.Contains(identifier, "@") {
-		query = `
-			SELECT id, full_name, email, cpf, is_guest
-			FROM users
-			WHERE email = $1 AND is_guest = true
-		`
-		args = []interface{}{strings.ToLower(identifier)}
-	} else {
-		cpfDigits, ok := cleanCPF(identifier)
-		if !ok {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "CPF inválido"})
-			return
-		}
-		query = `
-			SELECT id, full_name, email, cpf, is_guest
-			FROM users
-			WHERE cpf_digits = $1 AND is_guest = true
-		`
-		args = []interface{}{cpfDigits}
-	}
-
-	var userID, fullName, email, cpf string
-	var isGuest bool
-	err := db.QueryRow(query, args...).Scan(&userID, &fullName, &email, &cpf, &isGuest)
+	var userID, fullName string
+	err := db.QueryRow(`
+		SELECT id, COALESCE(full_name, '')
+		FROM users
+		WHERE lower(email) = $1 AND cpf_digits = $2 AND is_guest = true
+	`, email, cpfDigits).Scan(&userID, &fullName)
 
 	if err == sql.ErrNoRows {
-		c.JSON(http.StatusOK, CheckGuestResponse{IsGuest: false})
+		guestNotFound(c)
 		return
 	} else if err != nil {
 		log.Printf("CheckGuest query error: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erro interno"})
+		guestNotFound(c)
 		return
 	}
 
-	// Verifica se tem tickets associados
 	hasTickets := false
-	err = db.QueryRow(`
+	if err := db.QueryRow(`
 		SELECT EXISTS(SELECT 1 FROM tickets WHERE user_id = $1 AND status = 'valid')
-	`, userID).Scan(&hasTickets)
+	`, userID).Scan(&hasTickets); err != nil {
+		log.Printf("CheckGuest tickets error: %v", err)
+	}
 
 	c.JSON(http.StatusOK, CheckGuestResponse{
 		IsGuest:    true,
 		FullName:   fullName,
-		Email:      email,
-		CPF:        cpf,
 		HasTickets: hasTickets,
 	})
 }
 
 type ClaimGuestRequest struct {
-	Identifier string `json:"identifier" binding:"required"` // e-mail ou CPF
-	Password   string `json:"password"   binding:"required,min=6"`
-	FullName   string `json:"fullName"`                        // opcional, preenchido do guest
+	Email     string `json:"email"     binding:"required,email"`
+	CPF       string `json:"cpf"       binding:"required"`
+	Password  string `json:"password"  binding:"required,min=6"`
+	FullName  string `json:"fullName"`
+	BirthDate string `json:"birthDate"` // YYYY-MM-DD, opcional
+	Phone     string `json:"phone"`     // opcional
 }
 
+// ClaimGuest — converte a conta guest em conta real.
+// Exige e-mail E CPF do mesmo guest (prova de posse), preserva o perfil
+// existente e transfere ingressos/pedidos/transações numa única transação.
 func ClaimGuest(c *gin.Context) {
 	var req ClaimGuestRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -400,42 +490,38 @@ func ClaimGuest(c *gin.Context) {
 		return
 	}
 
-	identifier := strings.TrimSpace(req.Identifier)
-	password := req.Password
-	fullName := strings.TrimSpace(req.FullName)
+	email := strings.ToLower(strings.TrimSpace(req.Email))
+	cpfDigits, ok := cleanCPF(req.CPF)
+	if email == "" || !ok {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Informe e-mail e CPF válidos."})
+		return
+	}
 
 	db := config.GetDB()
 
-	// 1. Busca o usuário guest
-	var query string
-	var args []interface{}
+	// 1. Guest só é encontrado quando e-mail e CPF pertencem à mesma linha.
+	var (
+		guestID, guestName, guestCPF                   string
+		guestPhone, guestAvatar                        sql.NullString
+		guestUsername, guestInstagram, guestPixKey     sql.NullString
+		guestPixKeyType                                sql.NullString
+		guestBirth                                     sql.NullTime
+	)
 
-	if strings.Contains(identifier, "@") {
-		query = `
-			SELECT id, full_name, email, cpf
-			FROM users
-			WHERE email = $1 AND is_guest = true
-		`
-		args = []interface{}{strings.ToLower(identifier)}
-	} else {
-		cpfDigits, ok := cleanCPF(identifier)
-		if !ok {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "CPF inválido"})
-			return
-		}
-		query = `
-			SELECT id, full_name, email, cpf
-			FROM users
-			WHERE cpf_digits = $1 AND is_guest = true
-		`
-		args = []interface{}{cpfDigits}
-	}
-
-	var guestID, guestFullName, guestEmail, guestCPF string
-	err := db.QueryRow(query, args...).Scan(&guestID, &guestFullName, &guestEmail, &guestCPF)
+	err := db.QueryRow(`
+		SELECT id,
+		       COALESCE(full_name, ''), COALESCE(cpf, ''),
+		       phone, avatar_url, username, instagram, birth_date, pix_key, pix_key_type
+		FROM users
+		WHERE lower(email) = $1 AND cpf_digits = $2 AND is_guest = true
+	`, email, cpfDigits).Scan(
+		&guestID, &guestName, &guestCPF,
+		&guestPhone, &guestAvatar, &guestUsername, &guestInstagram,
+		&guestBirth, &guestPixKey, &guestPixKeyType,
+	)
 
 	if err == sql.ErrNoRows {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Conta de convidado não encontrada"})
+		c.JSON(http.StatusNotFound, gin.H{"error": "Não encontramos nenhuma compra com este e-mail e CPF."})
 		return
 	} else if err != nil {
 		log.Printf("ClaimGuest find guest error: %v", err)
@@ -443,34 +529,93 @@ func ClaimGuest(c *gin.Context) {
 		return
 	}
 
+	fullName := strings.TrimSpace(req.FullName)
 	if fullName == "" {
-		fullName = guestFullName
+		fullName = guestName
 	}
 
-	// 2. Cria usuário no Supabase Auth
-	authResp, status, err := supabaseSignUp(guestEmail, password, fullName)
-	if err != nil {
-		if status == http.StatusUnprocessableEntity || status == http.StatusBadRequest {
-			c.JSON(http.StatusConflict, gin.H{
-				"error": "Este e-mail já possui uma conta no Supabase.",
-				"code":  "email_conflict",
+	// O que a pessoa digitou no formulário completa o que faltava no guest.
+	// O que já existir na conta real tem prioridade (garantido pelo COALESCE
+	// do ON CONFLICT mais abaixo).
+	birthDate := guestBirth
+	if t, err := time.Parse("2006-01-02", strings.TrimSpace(req.BirthDate)); err == nil {
+		if t.After(time.Now().AddDate(-16, 0, 0)) {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error": "É necessário ter pelo menos 16 anos para se cadastrar.",
+				"code":  "age_restriction",
 			})
 			return
 		}
-		log.Printf("ClaimGuest supabase signup error: %v", err)
-		c.JSON(http.StatusBadGateway, gin.H{"error": "Erro ao criar conta: " + err.Error()})
+		birthDate = sql.NullTime{Time: t, Valid: true}
+	}
+
+	phone := guestPhone
+	if cleaned := cleanPhone(req.Phone); cleaned != "" {
+		phone = sql.NullString{String: cleaned, Valid: true}
+	}
+
+	// 2. Garante um usuário no Supabase Auth com esse e-mail.
+	authResp, status, signErr := supabaseSignUp(email, req.Password, fullName)
+
+	switch {
+	case signErr == nil:
+		if authResp.User == nil || authResp.User.ID == "" {
+			c.JSON(http.StatusBadGateway, gin.H{"error": "Resposta inesperada do serviço de autenticação"})
+			return
+		}
+		// Se o projeto exige confirmação de e-mail o signup não volta com
+		// tokens, então autentica para obter a sessão.
+		if authResp.AccessToken == "" {
+			if loginResp, _, lerr := supabaseSignInWithPassword(email, req.Password); lerr == nil {
+				authResp = loginResp
+			}
+		}
+
+	case status == http.StatusUnprocessableEntity ||
+		status == http.StatusBadRequest ||
+		status == http.StatusConflict:
+		// 3. Já existe conta no Supabase (cadastro anterior ou login Google).
+		// O usuário provou posse com e-mail + CPF, então a senha escolhida
+		// aqui passa a valer para essa conta.
+		adminUser, ferr := supabaseAdminFindUserByEmail(email)
+		if ferr != nil {
+			log.Printf("ClaimGuest admin lookup error: %v", ferr)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Erro interno"})
+			return
+		}
+		if adminUser == nil || adminUser.ID == "" {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "E-mail ou senha inválidos."})
+			return
+		}
+
+		if err := supabaseAdminSetPassword(adminUser.ID, req.Password); err != nil {
+			log.Printf("ClaimGuest admin set password error: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Erro ao definir a senha"})
+			return
+		}
+
+		loginResp, _, lerr := supabaseSignInWithPassword(email, req.Password)
+		if lerr != nil || loginResp.User == nil {
+			log.Printf("ClaimGuest signin after claim error: %v", lerr)
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "E-mail ou senha inválidos."})
+			return
+		}
+		authResp = loginResp
+
+	default:
+		log.Printf("ClaimGuest supabase signup error: %v", signErr)
+		c.JSON(http.StatusBadGateway, gin.H{"error": "Erro ao criar conta"})
 		return
 	}
 
-	if authResp.User == nil || authResp.User.ID == "" {
+	if authResp == nil || authResp.User == nil || authResp.User.ID == "" {
 		c.JSON(http.StatusBadGateway, gin.H{"error": "Resposta inesperada do serviço de autenticação"})
 		return
 	}
 
 	newUserID := authResp.User.ID
 
-	// 3. Atualiza users: troca o ID do guest para o novo ID do Supabase
-	// Usa transação para garantir consistência
+	// 4. Transfere os dados do guest para a conta real, em uma transação.
 	tx, err := db.Begin()
 	if err != nil {
 		log.Printf("ClaimGuest tx begin error: %v", err)
@@ -479,45 +624,58 @@ func ClaimGuest(c *gin.Context) {
 	}
 	defer tx.Rollback()
 
-	// Atualiza tickets para o novo user_id
-	_, err = tx.Exec(`UPDATE tickets SET user_id = $1 WHERE user_id = $2`, newUserID, guestID)
+	transfers := []struct {
+		label string
+		query string
+	}{
+		{"ingressos", `UPDATE tickets SET user_id = $1 WHERE user_id = $2`},
+		{"transações do market", `UPDATE market_transactions SET buyer_id = $1 WHERE buyer_id = $2`},
+		{"pedidos", `UPDATE orders SET user_id = $1 WHERE user_id = $2`},
+	}
+
+	for _, t := range transfers {
+		if _, err := tx.Exec(t.query, newUserID, guestID); err != nil {
+			log.Printf("ClaimGuest transfer %s error: %v", t.label, err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Erro ao transferir seus dados"})
+			return
+		}
+	}
+
+	// Preserva o que já existir na conta real e completa o que faltar com o
+	// perfil do guest (nada de DELETE + INSERT, que perderia os campos).
+	_, err = tx.Exec(`
+		INSERT INTO users (
+			id, email, full_name, cpf, phone, avatar_url,
+			username, instagram, birth_date, pix_key, pix_key_type, is_guest
+		)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11, false)
+		ON CONFLICT (id) DO UPDATE SET
+			email        = EXCLUDED.email,
+			full_name    = COALESCE(NULLIF(users.full_name, ''), EXCLUDED.full_name),
+			cpf          = COALESCE(NULLIF(users.cpf, ''), EXCLUDED.cpf),
+			phone        = COALESCE(NULLIF(users.phone, ''), EXCLUDED.phone),
+			avatar_url   = COALESCE(NULLIF(users.avatar_url, ''), EXCLUDED.avatar_url),
+			username     = COALESCE(NULLIF(users.username, ''), EXCLUDED.username),
+			instagram    = COALESCE(NULLIF(users.instagram, ''), EXCLUDED.instagram),
+			birth_date   = COALESCE(users.birth_date, EXCLUDED.birth_date),
+			pix_key      = COALESCE(NULLIF(users.pix_key, ''), EXCLUDED.pix_key),
+			pix_key_type = COALESCE(NULLIF(users.pix_key_type, ''), EXCLUDED.pix_key_type),
+			is_guest     = false,
+			updated_at   = NOW()
+	`,
+		newUserID, email, fullName, guestCPF, phone, guestAvatar,
+		guestUsername, guestInstagram, birthDate, guestPixKey, guestPixKeyType,
+	)
 	if err != nil {
-		log.Printf("ClaimGuest update tickets error: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erro ao transferir ingressos"})
+		log.Printf("ClaimGuest upsert user error: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erro ao criar conta real"})
 		return
 	}
 
-	// Atualiza market_transactions
-	_, err = tx.Exec(`UPDATE market_transactions SET buyer_id = $1 WHERE buyer_id = $2`, newUserID, guestID)
-	if err != nil {
-		log.Printf("ClaimGuest update market_transactions error: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erro ao transferir transações"})
-		return
-	}
-
-	// Atualiza orders
-	_, err = tx.Exec(`UPDATE orders SET user_id = $1 WHERE user_id = $2`, newUserID, guestID)
-	if err != nil {
-		log.Printf("ClaimGuest update orders error: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erro ao transferir pedidos"})
-		return
-	}
-
-	// Deleta o usuário guest (agora órfão) e insere o novo usuário
-	_, err = tx.Exec(`DELETE FROM users WHERE id = $1`, guestID)
-	if err != nil {
+	// O guest só é removido depois que nenhuma referência aponta para ele.
+	if _, err := tx.Exec(`DELETE FROM users WHERE id = $1`, guestID); err != nil {
 		log.Printf("ClaimGuest delete guest error: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erro ao remover conta guest"})
-		return
-	}
-
-	_, err = tx.Exec(`
-		INSERT INTO users (id, email, full_name, cpf, is_guest)
-		VALUES ($1, $2, $3, $4, false)
-	`, newUserID, guestEmail, fullName, guestCPF)
-	if err != nil {
-		log.Printf("ClaimGuest insert user error: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erro ao criar conta real"})
 		return
 	}
 
@@ -527,12 +685,19 @@ func ClaimGuest(c *gin.Context) {
 		return
 	}
 
-	// 4. Retorna tokens
+	if authResp.AccessToken == "" || authResp.RefreshToken == "" {
+		c.JSON(http.StatusBadGateway, gin.H{
+			"error": "Conta convertida, mas não foi possível iniciar a sessão. Faça login.",
+		})
+		return
+	}
+
+	// 5. Retorna tokens
 	c.JSON(http.StatusOK, LoginResponse{
 		AccessToken:  authResp.AccessToken,
 		RefreshToken: authResp.RefreshToken,
 		UserID:       newUserID,
-		Email:        guestEmail,
+		Email:        email,
 		FullName:     fullName,
 	})
 }
