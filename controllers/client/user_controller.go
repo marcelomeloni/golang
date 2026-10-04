@@ -38,9 +38,8 @@ type UpdatePixKeyRequest struct {
 }
 
 func GetUserProfile(c *gin.Context) {
-	userID := c.Param("userId")
-	if userID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "userId é obrigatório"})
+	userID, ok := requireSelf(c)
+	if !ok {
 		return
 	}
 
@@ -116,9 +115,8 @@ func GetUserProfile(c *gin.Context) {
 }
 
 func UpdateUserProfile(c *gin.Context) {
-	userID := c.Param("userId")
-	if userID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "userId é obrigatório"})
+	userID, ok := requireSelf(c)
+	if !ok {
 		return
 	}
 
@@ -170,9 +168,8 @@ func UpdateUserProfile(c *gin.Context) {
 
 // UpdatePixKey salva ou atualiza a chave PIX do usuário para recebimento de vendas no Reppy Market.
 func UpdatePixKey(c *gin.Context) {
-	userID := c.Param("userId")
-	if userID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "userId é obrigatório"})
+	userID, ok := requireSelf(c)
+	if !ok {
 		return
 	}
 
@@ -201,9 +198,8 @@ func UpdatePixKey(c *gin.Context) {
 }
 
 func UploadUserAvatar(c *gin.Context) {
-	userID := c.Param("userId")
-	if userID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "userId é obrigatório"})
+	userID, ok := requireSelf(c)
+	if !ok {
 		return
 	}
 

@@ -51,8 +51,8 @@ func Register(r *gin.Engine) {
 		// ── Manage (overview + sub-páginas) ───────────────────────────────────
 		auth.GET("/org/:slug/events/:id/manage", controllers.GetEventManageHandler)
 
-		auth.GET("/org/:slug/events/:id/checkin-data",             controllers.GetCheckinDataHandler)
-		auth.PATCH("/org/:slug/events/:id/checkin-data/:ticketID", controllers.PatchCheckinHandler)
+		auth.GET("/org/:slug/events/:id/checkin-data", controllers.GetCheckinDataHandler)
+		auth.PATCH("/org/:slug/events/:id/checkin-data", controllers.PatchCheckinHandler)
 
 		auth.GET("/org/:slug/events/:id/finance/painel", controllers.GetFinancePainelHandler)
 		auth.GET("/org/:slug/events/:id/finance/resumo", controllers.GetFinanceResumoHandler)

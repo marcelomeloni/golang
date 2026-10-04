@@ -15,13 +15,6 @@ func Register(r *gin.Engine) {
 		clientGroup.POST("/auth/check-guest", client.CheckGuest)
 		clientGroup.POST("/auth/claim-guest", client.ClaimGuest)
 
-		clientGroup.GET("/auth/profile/:userId", client.CheckProfile)
-		clientGroup.POST("/auth/complete-profile", client.CompleteProfile)
-
-		clientGroup.GET("/users/:userId", client.GetUserProfile)
-		clientGroup.PATCH("/users/:userId", client.UpdateUserProfile)
-		clientGroup.POST("/users/:userId/avatar", client.UploadUserAvatar)
-
 		clientGroup.GET("/home-events", client.GetHomeEvents)
 		clientGroup.GET("/events/:slug", client.GetEventDetail)
 		clientGroup.GET("/search", client.Search)
@@ -36,6 +29,14 @@ func Register(r *gin.Engine) {
 
 		authed := clientGroup.Group("/", middleware.AuthMiddleware())
 		{
+			// Perfil: o dono vem do token (claim "sub"); o :userId da URL, quando
+			// presente, precisa bater com ele (ver requireSelf).
+			authed.GET("/auth/profile/:userId", client.CheckProfile)
+			authed.POST("/auth/complete-profile", client.CompleteProfile)
+
+			authed.GET("/users/:userId", client.GetUserProfile)
+			authed.PATCH("/users/:userId", client.UpdateUserProfile)
+			authed.POST("/users/:userId/avatar", client.UploadUserAvatar)
 			authed.PATCH("/users/:userId/pix-key", client.UpdatePixKey)
 
 			authed.GET("/my-tickets", client.GetMyTickets)

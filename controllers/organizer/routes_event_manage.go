@@ -19,7 +19,8 @@ func RegisterEventManageRoutes(rg *gin.RouterGroup) {
 	// ── Check-in ─────────────────────────────────────────────────────────────
 	// Qualquer membro (checkin_staff inclusive)
 	rg.GET("/checkin-data", GetCheckinDataHandler)
-	rg.PATCH("/checkin-data/:ticketID", PatchCheckinHandler)
+	// Check-in recebe o token do QR code no body, não o id na URL.
+	rg.PATCH("/checkin-data", PatchCheckinHandler)
 
 	// ── Financeiro ────────────────────────────────────────────────────────────
 	// Apenas owner/admin (ResolveOrgWithPermission internamente)

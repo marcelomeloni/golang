@@ -37,10 +37,17 @@ func CreateMarketOrder(c *gin.Context) {
 	userIDStr, _ := userID.(string)
 	isGuest := userIDStr == ""
 
+	buyerCPF, err := orderservice.BuyerCPF(db, userIDStr, req.BuyerCPF)
+	if err != nil {
+		log.Printf("CreateMarketOrder BuyerCPF: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao identificar comprador"})
+		return
+	}
+
 	guest := &orderservice.GuestInfo{
 		Name:  req.BuyerName,
 		Email: req.BuyerEmail,
-		CPF:   req.BuyerCPF,
+		CPF:   buyerCPF,
 	}
 
 	buyerID, conflict, err := orderservice.ResolveUserID(db, userIDStr, guest)
@@ -85,7 +92,7 @@ func CreateMarketOrder(c *gin.Context) {
 	}
 
 	pixResult, err := paymentservice.Default.GeneratePix(
-		orderID, total, req.BuyerName, req.BuyerEmail, req.BuyerCPF, "",
+		orderID, total, req.BuyerName, req.BuyerEmail, buyerCPF, "",
 	)
 	if err != nil {
 		log.Printf("CreateMarketOrder GeneratePix orderID=%s: %v", orderID, err)

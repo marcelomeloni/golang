@@ -27,7 +27,6 @@ type CheckProfileResponse struct {
 }
 
 type CompleteProfileRequest struct {
-	UserID    string `json:"userId"    binding:"required"`
 	FullName  string `json:"fullName"  binding:"required"`
 	CPF       string `json:"cpf"       binding:"required"`
 	BirthDate string `json:"birthDate" binding:"required"` // YYYY-MM-DD
@@ -44,9 +43,8 @@ type CompleteProfileRequest struct {
 
 // CheckProfile — retorna dados existentes do usuário incluindo CPF e data de nascimento
 func CheckProfile(c *gin.Context) {
-	userID := c.Param("userId")
-	if userID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "userId é obrigatório"})
+	userID, ok := requireSelf(c)
+	if !ok {
 		return
 	}
 
@@ -118,6 +116,11 @@ func CompleteProfile(c *gin.Context) {
 		return
 	}
 
+	userID, ownerOK := requireSelf(c)
+	if !ownerOK {
+		return
+	}
+
 	birthDate, err := time.Parse("2006-01-02", req.BirthDate)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Data de nascimento inválida. Use o formato YYYY-MM-DD."})
@@ -140,7 +143,7 @@ func CompleteProfile(c *gin.Context) {
 	// 1. Verifica CPF duplicado em outra conta
 	err = db.QueryRow(
 		`SELECT id FROM users WHERE cpf = $1 AND id != $2`,
-		cpfClean, req.UserID,
+		cpfClean, userID,
 	).Scan(&existingID)
 	if err == nil {
 		c.JSON(http.StatusConflict, gin.H{
@@ -154,7 +157,7 @@ func CompleteProfile(c *gin.Context) {
 	if phoneClean != "" {
 		err = db.QueryRow(
 			`SELECT id FROM users WHERE phone = $1 AND id != $2`,
-			phoneClean, req.UserID,
+			phoneClean, userID,
 		).Scan(&existingID)
 		if err == nil {
 			c.JSON(http.StatusConflict, gin.H{
@@ -169,7 +172,7 @@ func CompleteProfile(c *gin.Context) {
 	if username != "" {
 		err = db.QueryRow(
 			`SELECT id FROM users WHERE username = $1 AND id != $2`,
-			username, req.UserID,
+			username, userID,
 		).Scan(&existingID)
 		if err == nil {
 			c.JSON(http.StatusConflict, gin.H{
@@ -199,7 +202,7 @@ func CompleteProfile(c *gin.Context) {
 		username,
 		instagram,
 		time.Now(),
-		req.UserID,
+		userID,
 	)
 	if err != nil {
 		log.Printf("Erro ao completar perfil: %v", err)

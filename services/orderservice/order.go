@@ -225,6 +225,31 @@ func isUniqueViolation(errMsg, column string) bool {
 	return strings.Contains(errMsg, column)
 }
 
+// BuyerCPF decide qual CPF usar na compra. Com sessão autenticada, o CPF da
+// conta é a fonte da verdade e o valor enviado pelo cliente é descartado: assim
+// o TaxID enviado ao gateway de Pix e usado para localizar o comprador não pode
+// ser falsificado. Sem sessão, vale o CPF enviado (fluxo de visitante).
+func BuyerCPF(db *sql.DB, contextUserID, sentCPF string) (string, error) {
+	if contextUserID == "" {
+		return sentCPF, nil
+	}
+
+	var accountCPF sql.NullString
+	err := db.QueryRow(`SELECT cpf FROM users WHERE id = $1`, contextUserID).Scan(&accountCPF)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return sentCPF, nil
+		}
+		return "", fmt.Errorf("buscar cpf da conta: %w", err)
+	}
+
+	if !accountCPF.Valid || strings.TrimSpace(accountCPF.String) == "" {
+		return sentCPF, nil
+	}
+
+	return strings.TrimSpace(accountCPF.String), nil
+}
+
 func Persist(
 	tx *sql.Tx,
 	eventID string,

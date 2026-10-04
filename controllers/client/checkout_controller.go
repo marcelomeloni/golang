@@ -60,10 +60,17 @@ func CreateOrder(c *gin.Context) {
 	userIDStr, _ := userID.(string)
 	isGuest := userIDStr == ""
 
+	buyerCPF, err := orderservice.BuyerCPF(db, userIDStr, req.BuyerCPF)
+	if err != nil {
+		log.Printf("CreateOrder BuyerCPF: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao identificar usuário"})
+		return
+	}
+
 	guest := &orderservice.GuestInfo{
 		Name:  req.BuyerName,
 		Email: req.BuyerEmail,
-		CPF:   req.BuyerCPF,
+		CPF:   buyerCPF,
 	}
 
 	userIDSQL, conflict, err := orderservice.ResolveUserID(db, userIDStr, guest)
@@ -181,7 +188,7 @@ func CreateOrder(c *gin.Context) {
 		return
 	}
 
-	pixResult, err := paymentservice.Default.GeneratePix(orderID, grandTotal, req.BuyerName, req.BuyerEmail, req.BuyerCPF, "")
+	pixResult, err := paymentservice.Default.GeneratePix(orderID, grandTotal, req.BuyerName, req.BuyerEmail, buyerCPF, "")
 	if err != nil {
 		// Pedido já persistido — não revertemos para evitar perda de dados. O webhook de expiração limpa pedidos sem pagamento.
 		log.Printf("CreateOrder GeneratePix orderID=%s: %v", orderID, err)
