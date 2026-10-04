@@ -236,9 +236,50 @@ type TransferRequest struct {
 	CPF string `json:"cpf" binding:"required"`
 }
 
+// transferResult carrega o que a notificação por e-mail precisa saber.
+// É montada depois do commit e consumida por notifyTicketTransfer.
+type transferResult struct {
+	RecipientID    string
+	RecipientName  string
+	RecipientEmail string
+	RecipientGuest bool
+	SenderCPF      string
+	EventID        string
+	EventName      string
+	TicketID       string
+	LoteName       string
+	NewQRCode      string
+}
+
 // POST /tickets/:id/transfer
+//
+// Transfere a posse do ingresso para outro usuário, localizado pelo CPF.
+//
+// Invariantes garantidas aqui:
+//   - só o dono atual de um ingresso válido e pago pode transferir;
+//   - o lote precisa ter allow_transfer;
+//   - não pode transferir para si mesmo;
+//   - não pode transferir enquanto o ingresso estiver anunciado no Market;
+//   - o QR anterior morre (novo QR é gerado) — o QR antigo não dá mais entrada;
+//   - radar_enabled é desligado, porque visibilidade no radar é da pessoa, não do ingresso;
+//   - radar_taps do remetente para este evento são limpos (órfãos sem dono);
+//   - a transferência fica registrada em ticket_transfers.
+//
+// Todas as checagens rodam DENTRO da transação e o UPDATE final é
+// condicional a t.user_id = remetente. Era o que faltava: a versão anterior
+// validava fora do tx, então duas requisições simultâneas passavam pelas duas
+// checagens e a segunda sobrescrevia a primeira.
 func TransferTicket(c *gin.Context) {
-	userID, _ := c.Get("userID")
+	userID, ok := c.Get("userID")
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "não autenticado"})
+		return
+	}
+	senderID, ok := userID.(string)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "não autenticado"})
+		return
+	}
 	ticketID := c.Param("id")
 
 	var req TransferRequest
@@ -252,21 +293,45 @@ func TransferTicket(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "CPF inválido"})
 		return
 	}
+	if !validarCPF(cpf) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "CPF inválido"})
+		return
+	}
 
-	db := config.GetDB()
+	tx, err := config.GetDB().Begin()
+	if err != nil {
+		log.Printf("TransferTicket begin: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "erro interno"})
+		return
+	}
+	defer tx.Rollback()
 
-	// Verifica posse, status ativo e permissão de transferência do lote
-	var allowTransfer bool
-	err := db.QueryRow(`
-		SELECT COALESCE(tb.allow_transfer, false)
+	// 1. Posse + status + permissão do lote, já travando a linha do ticket.
+	//    FOR UPDATE serializa transferências concorrentes do mesmo ingresso.
+	var (
+		allowTransfer bool
+		eventID       string
+		eventName     string
+		previousQR    sql.NullString
+		loteName      sql.NullString
+	)
+	err = tx.QueryRow(`
+		SELECT
+			COALESCE(tb.allow_transfer, false),
+			e.id,
+			e.title,
+			t.qr_code,
+			tb.name
 		FROM tickets t
 		JOIN orders o ON o.id = t.order_id
-		JOIN ticket_batches tb ON tb.id = t.batch_id
+		JOIN events e ON e.id = o.event_id
+		LEFT JOIN ticket_batches tb ON tb.id = t.batch_id
 		WHERE t.id = $1
 		  AND t.user_id = $2
 		  AND t.status = 'valid'
 		  AND o.status = 'paid'
-	`, ticketID, userID).Scan(&allowTransfer)
+		FOR UPDATE OF t
+	`, ticketID, senderID).Scan(&allowTransfer, &eventID, &eventName, &previousQR, &loteName)
 	if err == sql.ErrNoRows {
 		c.JSON(http.StatusNotFound, gin.H{"error": "ingresso não encontrado"})
 		return
@@ -282,14 +347,25 @@ func TransferTicket(c *gin.Context) {
 		return
 	}
 
-	// Encontra o destinatário pelo CPF
-	var recipientID string
-	err = db.QueryRow(`
-		SELECT id FROM users
-		WHERE REPLACE(REPLACE(cpf, '.', ''), '-', '') = $1
-	`, cpf).Scan(&recipientID)
+	// 2. Destinatário. Usa cpf_digits (coluna gerada, indexada) em vez de
+	//    REPLACE(REPLACE(cpf,...)) sobre a coluna crua — mesma semântica,
+	//    mas sem varrer a tabela a cada transferência.
+	var (
+		recipientID    string
+		recipientName  sql.NullString
+		recipientEmail sql.NullString
+		recipientGuest bool
+	)
+	err = tx.QueryRow(`
+		SELECT id, full_name, email, COALESCE(is_guest, false)
+		FROM users
+		WHERE cpf_digits = $1
+	`, cpf).Scan(&recipientID, &recipientName, &recipientEmail, &recipientGuest)
 	if err == sql.ErrNoRows {
-		c.JSON(http.StatusNotFound, gin.H{"error": "usuário não encontrado com este CPF"})
+		c.JSON(http.StatusNotFound, gin.H{
+			"error":   "usuário não encontrado com este CPF",
+			"code":    "recipient_not_found",
+		})
 		return
 	}
 	if err != nil {
@@ -298,20 +374,28 @@ func TransferTicket(c *gin.Context) {
 		return
 	}
 
-	if recipientID == userID.(string) {
+	if recipientID == senderID {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "você não pode transferir para si mesmo"})
 		return
 	}
 
-	// Bloqueia se estiver listado no Market
+	// 3. Market. O erro precisa ser checado: engolido, ele deixaria
+	//    listed = 0 e a transferência passaria com o ingresso anunciado.
 	var listed int
-	db.QueryRow(`SELECT COUNT(*) FROM market_listings WHERE ticket_id = $1 AND status = 'active'`, ticketID).Scan(&listed)
+	if err := tx.QueryRow(
+		`SELECT COUNT(*) FROM market_listings WHERE ticket_id = $1 AND status = 'active'`,
+		ticketID,
+	).Scan(&listed); err != nil {
+		log.Printf("TransferTicket market check: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "erro interno"})
+		return
+	}
 	if listed > 0 {
 		c.JSON(http.StatusConflict, gin.H{"error": "remova o ingresso do Reppy Market antes de transferir"})
 		return
 	}
 
-	// Gera novo QR code para o destinatário — invalida o código anterior
+	// 4. Novo QR invalida o anterior — o QR do remetente deixa de valer.
 	newQRCode, err := orderservice.GenerateQRCode()
 	if err != nil {
 		log.Printf("TransferTicket generate qr: %v", err)
@@ -319,28 +403,91 @@ func TransferTicket(c *gin.Context) {
 		return
 	}
 
-	tx, err := db.Begin()
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "erro interno"})
-		return
-	}
-	defer tx.Rollback()
+	var senderCPF sql.NullString
+	_ = tx.QueryRow(`SELECT cpf FROM users WHERE id = $1`, senderID).Scan(&senderCPF)
 
-	_, err = tx.Exec(`
+	// 5. Transferência. O WHERE repete user_id e status: é a rede de segurança
+	//    final contra corrida, mesmo com o FOR UPDATE acima.
+	res, err := tx.Exec(`
 		UPDATE tickets
 		SET user_id = $1, status = 'valid', qr_code = $3, radar_enabled = false
 		WHERE id = $2
-	`, recipientID, ticketID, newQRCode)
+		  AND user_id = $4
+		  AND status = 'valid'
+	`, recipientID, ticketID, newQRCode, senderID)
 	if err != nil {
 		log.Printf("TransferTicket update: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao transferir ingresso"})
 		return
 	}
+	if affected, err := res.RowsAffected(); err != nil {
+		log.Printf("TransferTicket rows affected: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "erro interno"})
+		return
+	} else if affected == 0 {
+		c.JSON(http.StatusConflict, gin.H{"error": "ingresso não está mais disponível para transferência"})
+		return
+	}
+
+	// 6. Radar: com radar_enabled = false o remetente sai das listas de todo
+	//    mundo, mas os radar_taps que o mencionam continuariam no banco sem
+	//    alcance. A lista de perfis do radar é puxada a partir de tickets
+	//    (reppy_radar_controller.go), então esses toques viram linhas morto.
+	//    Apaga nos dois sentidos porque quem tinha tocado no remetente
+	//    também ficaria apontando para alguém que não aparece mais.
+	if _, err := tx.Exec(`
+		DELETE FROM radar_taps
+		WHERE event_id = $2
+		  AND (from_user_id = $1 OR to_user_id = $1)
+	`, senderID, eventID); err != nil {
+		log.Printf("TransferTicket cleanup radar_taps: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao transferir ingresso"})
+		return
+	}
+
+	// 7. Auditoria. Sem histórico, "meu ingresso sumiu" não tem resposta.
+	if _, err := tx.Exec(`
+		INSERT INTO ticket_transfers (
+			ticket_id, from_user_id, to_user_id, from_cpf, to_cpf,
+			previous_qr_code, new_qr_code, event_id, from_is_guest, to_is_guest
+		)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8,
+			COALESCE((SELECT is_guest FROM users WHERE id = $2), false),
+			$9
+		)
+	`, ticketID, senderID, recipientID, senderCPF, cpf,
+		previousQR, newQRCode, eventID, recipientGuest,
+	); err != nil {
+		log.Printf("TransferTicket audit insert: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao registrar transferência"})
+		return
+	}
 
 	if err := tx.Commit(); err != nil {
+		log.Printf("TransferTicket commit: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao confirmar transferência"})
 		return
 	}
+
+	result := transferResult{
+		RecipientID:    recipientID,
+		RecipientName:  recipientName.String,
+		RecipientEmail: recipientEmail.String,
+		RecipientGuest: recipientGuest,
+		SenderCPF:      senderCPF.String,
+		EventID:        eventID,
+		EventName:      eventName,
+		TicketID:       ticketID,
+		LoteName:       loteName.String,
+		NewQRCode:      newQRCode,
+	}
+
+	// 8. Notificação fora da transação: e-mail é I/O lento e não pode
+	//    segurar o lock do ticket. Se falhar, a transferência já está
+	//    confirmada no banco — o usuário ainda vê o erro do e-mail no log,
+	//    mas o ingresso está transferido. Pior caso: destinatário não
+	//    avisado, o que a tela de "meus ingressos" ainda compensa.
+	go notifyTicketTransfer(result)
 
 	c.JSON(http.StatusOK, gin.H{"message": "ingresso transferido com sucesso"})
 }
