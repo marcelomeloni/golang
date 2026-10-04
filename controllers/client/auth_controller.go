@@ -46,13 +46,6 @@ type LoginResponse struct {
 	FullName     string `json:"fullName"`
 }
 
-// ==========================================
-// CONFIG SUPABASE
-//
-// Necessário no .env / ambiente:
-//   SUPABASE_URL       = https://SEU-PROJETO.supabase.co
-//   SUPABASE_ANON_KEY  = a chave "anon public" do projeto
-// ==========================================
 
 func supabaseURL() string {
 	return strings.TrimRight(os.Getenv("SUPABASE_URL"), "/")
@@ -65,8 +58,13 @@ func supabaseAnonKey() string {
 // supabaseServiceRoleKey — chave administrativa do Supabase.
 // ATENÇÃO: nunca expor no frontend. Usada apenas no servidor para
 // reconciliar contas já existentes durante o claim de guest.
+// SUPABASE_SERVICE_KEY é o nome já usado em services/storage/storage.go;
+// SUPABASE_SERVICE_ROLE_KEY fica como fallback.
 func supabaseServiceRoleKey() string {
-	return os.Getenv("SUPABASE_SERVICE_KEY")
+	if key := os.Getenv("SUPABASE_SERVICE_KEY"); key != "" {
+		return key
+	}
+	return os.Getenv("SUPABASE_SERVICE_ROLE_KEY")
 }
 
 // supabaseAdminFindUserByEmail procura um usuário já existente no Supabase Auth.
@@ -624,25 +622,24 @@ func ClaimGuest(c *gin.Context) {
 	}
 	defer tx.Rollback()
 
-	transfers := []struct {
-		label string
-		query string
-	}{
-		{"ingressos", `UPDATE tickets SET user_id = $1 WHERE user_id = $2`},
-		{"transações do market", `UPDATE market_transactions SET buyer_id = $1 WHERE buyer_id = $2`},
-		{"pedidos", `UPDATE orders SET user_id = $1 WHERE user_id = $2`},
+	// 4.1 O guest precisa soltar os campos com índice unique (email, cpf,
+	// phone, username) antes de criarmos a linha real, senão o INSERT
+	// esbarra em users_email_key / users_cpf_key / users_phone_key /
+	// users_username_key. A linha é removida no fim desta mesma
+	// transação, então nada se perde. cpf_digits é gerado no banco a
+	// partir de cpf, então zerar cpf já limpa cpf_digits junto.
+	if _, err := tx.Exec(`
+		UPDATE users
+		SET email = NULL, cpf = NULL, phone = NULL, username = NULL, updated_at = NOW()
+		WHERE id = $1
+	`, guestID); err != nil {
+		log.Printf("ClaimGuest release guest unique fields error: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erro ao converter sua conta"})
+		return
 	}
 
-	for _, t := range transfers {
-		if _, err := tx.Exec(t.query, newUserID, guestID); err != nil {
-			log.Printf("ClaimGuest transfer %s error: %v", t.label, err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Erro ao transferir seus dados"})
-			return
-		}
-	}
-
-	// Preserva o que já existir na conta real e completa o que faltar com o
-	// perfil do guest (nada de DELETE + INSERT, que perderia os campos).
+	// 4.2 Cria/atualiza a conta real. Preserva o que já existir nela e
+	// completa o que faltar com o perfil do guest.
 	_, err = tx.Exec(`
 		INSERT INTO users (
 			id, email, full_name, cpf, phone, avatar_url,
@@ -672,7 +669,33 @@ func ClaimGuest(c *gin.Context) {
 		return
 	}
 
-	// O guest só é removido depois que nenhuma referência aponta para ele.
+	// 4.3 Só agora as referências podem ser movidas: tickets_user_id_fkey
+	// (e afins) exige que a linha do novo usuário já exista.
+	transfers := []struct {
+		label string
+		query string
+	}{
+		{"ingressos", `UPDATE tickets SET user_id = $1 WHERE user_id = $2`},
+		{"pedidos", `UPDATE orders SET user_id = $1 WHERE user_id = $2`},
+		{"transações do market", `UPDATE market_transactions SET buyer_id = $1 WHERE buyer_id = $2`},
+		{"anúncios do market", `UPDATE market_listings SET seller_id = $1 WHERE seller_id = $2`},
+		{"eventos seguidos", `UPDATE organization_followers SET user_id = $1 WHERE user_id = $2`},
+		{"organizações", `UPDATE organization_members SET user_id = $1 WHERE user_id = $2`},
+		{"bloqueios do radar", `UPDATE radar_blocks SET blocker_user_id = $1 WHERE blocker_user_id = $2`},
+		{"bloqueios do radar (bloqueado)", `UPDATE radar_blocks SET blocked_user_id = $1 WHERE blocked_user_id = $2`},
+		{"toques no radar (origem)", `UPDATE radar_taps SET from_user_id = $1 WHERE from_user_id = $2`},
+		{"toques no radar (destino)", `UPDATE radar_taps SET to_user_id = $1 WHERE to_user_id = $2`},
+	}
+
+	for _, t := range transfers {
+		if _, err := tx.Exec(t.query, newUserID, guestID); err != nil {
+			log.Printf("ClaimGuest transfer %s error: %v", t.label, err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Erro ao transferir seus dados"})
+			return
+		}
+	}
+
+	// 4.4 O guest só é removido depois que nenhuma referência aponta para ele.
 	if _, err := tx.Exec(`DELETE FROM users WHERE id = $1`, guestID); err != nil {
 		log.Printf("ClaimGuest delete guest error: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erro ao remover conta guest"})
