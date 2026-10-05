@@ -41,18 +41,11 @@ func BuildPromoterEmission(d PromoterEmissionData) (subject, html string, err er
 		"{{LOTE}}",            loteLabel(d.LoteNome),
 		"{{QR_CODE}}",         d.QRCode,
 		"{{PROMOTER_NAME}}",   promoterLabel(d.PromoterName),
-		"{{GUEST_ALERT}}",     guestAlert(true),
+		"{{GUEST_ALERT}}",     guestAlertPromoter(true),
 		"{{ATTACHMENT_NOTE}}", promoterAttachmentNote(),
 	)
 
 	return subject, r.Replace(string(tmplBytes)), nil
-}
-
-func loteLabel(lote string) string {
-	if lote == "" {
-		return "Ingresso"
-	}
-	return lote
 }
 
 func promoterLabel(name string) string {
@@ -61,15 +54,6 @@ func promoterLabel(name string) string {
 		return "um promoter do evento"
 	}
 	return name
-}
-
-func guestAlert(isGuest bool) string {
-	if !isGuest {
-		return ""
-	}
-	return `<div style="margin:0 0 20px;padding:14px 18px;background:#FFF8E1;border:1px solid #F0D68A;border-radius:12px;font-size:13px;color:#6B5A1F;line-height:1.6;">
-              ⚠️ Este ingresso foi emitido por um promoter para uma conta de visitante. Se você não esperava este ingresso, não use o QR Code — fale com a gente.
-            </div>`
 }
 
 func promoterAttachmentNote() string {

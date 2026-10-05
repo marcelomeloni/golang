@@ -5,13 +5,58 @@ import (
 	"database/sql"
 	"log"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
 	"bilheteria-api/config"
-	"bilheteria-api/services/orgservice"
 	"github.com/gin-gonic/gin"
 )
+
+// resolveCheckinOrg valida que o usuário é membro da org e que pode operar o
+// balcão de check-in, devolvendo o orgID.
+//
+// Promoter fica de fora de propósito: a UI mantém promoter em modo somente
+// leitura, então a API precisa do mesmo filtro para não ser contornada chamando
+// o endpoint direto. owner/admin podem tudo; checkin_staff é o papel do balcão.
+func resolveCheckinOrg(ctx context.Context, db *sql.DB, slug, uid string) (string, bool) {
+	var orgID, role string
+	// Uma query só: o balcão de check-in sofre com queries extras por leitura.
+	if err := db.QueryRowContext(ctx,
+		`SELECT o.id, om.role
+		   FROM organizations o
+		   JOIN organization_members om ON om.organization_id = o.id
+		  WHERE o.slug = $1 AND om.user_id = $2`,
+		slug, uid,
+	).Scan(&orgID, &role); err != nil {
+		return "", false
+	}
+
+	switch role {
+	case "owner", "admin", "checkin_staff":
+		return orgID, true
+	default:
+		return "", false
+	}
+}
+
+// eventBelongsToOrg confirma que o evento da URL pertence à organização do
+// usuário. Sem essa checagem, um membro de uma org consegue ler e marcar
+// check-in em eventos de outra org só adivinhando o id na URL.
+func eventBelongsToOrg(ctx context.Context, db *sql.DB, eventID, orgID string) bool {
+	var exists bool
+	if err := db.QueryRowContext(ctx,
+		`SELECT EXISTS(SELECT 1 FROM events WHERE id = $1 AND organization_id = $2)`,
+		eventID, orgID,
+	).Scan(&exists); err != nil {
+		log.Printf("eventBelongsToOrg: %v", err)
+		return false
+	}
+	return exists
+}
+
+// nonDigitsRe casa qualquer coisa que não seja dígito.
+var nonDigitsRe = regexp.MustCompile(`\D`)
 
 // Status possíveis de um ingresso.
 const (
@@ -36,9 +81,16 @@ func GetCheckinDataHandler(c *gin.Context) {
 	db := config.GetDB()
 	ctx := c.Request.Context()
 
-	_, err := orgservice.ResolveOrgWithAnyMember(ctx, db, orgSlug, uid)
-	if err != nil {
+	orgID, ok := resolveCheckinOrg(ctx, db, orgSlug, uid)
+	if !ok {
 		c.JSON(http.StatusForbidden, gin.H{"error": "acesso negado"})
+		return
+	}
+
+	// Sem isso, um membro da org A leria os ingressos de um evento da org B
+	// passando o id do evento na URL.
+	if !eventBelongsToOrg(ctx, db, eventID, orgID) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "evento não encontrado"})
 		return
 	}
 
@@ -225,6 +277,130 @@ func loadTicketByQRCode(ctx context.Context, db *sql.DB, qrCode, eventID string)
 	return &t, nil
 }
 
+// cleanCPFDigits devolve só os dígitos do CPF, para comparar com a coluna
+// gerada cpf_digits.
+func cleanCPFDigits(raw string) string {
+	return nonDigitsRe.ReplaceAllString(raw, "")
+}
+
+// formatCPFDigits formata 11 dígitos como 000.000.000-00.
+func formatCPFDigits(digits string) string {
+	if len(digits) != 11 {
+		return digits
+	}
+	return digits[0:3] + "." + digits[3:6] + "." + digits[6:9] + "-" + digits[9:11]
+}
+
+// GetCheckinCPFLookupHandler — GET /org/:slug/events/:id/checkin-data/lookup?cpf=
+//
+// Busca os ingressos do CPF informado dentro do evento da URL. Staff pode usar
+// isso quando o participante não tem o QR impresso à mão.
+//
+// Devolve uma lista porque a mesma pessoa pode ter mais de um ingresso no mesmo
+// evento (lotes diferentes, ou quantity > 1). O front confirma um por vez.
+//
+// Ingressos cancelados entram na resposta com status próprio: o staff precisa
+// ver que o ingresso existe e está cancelado, e não simplesmente "não achei".
+func GetCheckinCPFLookupHandler(c *gin.Context) {
+	orgSlug := c.Param("slug")
+	eventID := c.Param("id")
+	userID, _ := c.Get("userID")
+	uid, _ := userID.(string)
+	if uid == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "não autenticado"})
+		return
+	}
+
+	db := config.GetDB()
+	ctx := c.Request.Context()
+
+	orgID, ok := resolveCheckinOrg(ctx, db, orgSlug, uid)
+	if !ok {
+		c.JSON(http.StatusForbidden, gin.H{"error": "acesso negado"})
+		return
+	}
+
+	if !eventBelongsToOrg(ctx, db, eventID, orgID) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "evento não encontrado"})
+		return
+	}
+
+	cpfDigits := cleanCPFDigits(c.Query("cpf"))
+	if len(cpfDigits) != 11 {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "CPF inválido",
+			"code":  "invalid_cpf",
+		})
+		return
+	}
+
+	rows, err := db.QueryContext(ctx, `
+		SELECT
+		  t.id,
+		  t.qr_code,
+		  t.status,
+		  t.checked_in_at,
+		  t.checked_in_by,
+		  tb.name   AS batch_name,
+		  tb.type   AS batch_type,
+		  o.id      AS order_id,
+		  u.id      AS user_id,
+		  u.full_name,
+		  u.email,
+		  u.cpf,
+		  u.avatar_url
+		FROM tickets t
+		JOIN orders o          ON o.id  = t.order_id
+		JOIN users  u          ON u.id  = t.user_id
+		JOIN ticket_batches tb ON tb.id = t.batch_id
+		WHERE o.event_id = $1
+		  AND o.status   = 'paid'
+		  AND u.cpf_digits = $2
+		ORDER BY tb.position ASC, t.created_at ASC`, eventID, cpfDigits,
+	)
+	if err != nil {
+		log.Printf("GetCheckinCPFLookupHandler query: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao buscar CPF"})
+		return
+	}
+	defer rows.Close()
+
+	tickets := []gin.H{}
+	for rows.Next() {
+		var t checkinTicket
+		if err := rows.Scan(
+			&t.ID, &t.QRCode, &t.Status, &t.CheckedInAt, &t.CheckedInBy,
+			&t.BatchName, &t.BatchType,
+			&t.OrderID,
+			&t.UserID,
+			&t.FullName, &t.Email, &t.CPF, &t.AvatarURL,
+		); err != nil {
+			log.Printf("GetCheckinCPFLookupHandler scan: %v", err)
+			continue
+		}
+		tickets = append(tickets, t.payload())
+	}
+	if err := rows.Err(); err != nil {
+		log.Printf("GetCheckinCPFLookupHandler rows: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao buscar CPF"})
+		return
+	}
+
+	if len(tickets) == 0 {
+		c.JSON(http.StatusNotFound, gin.H{
+			"error":   "nenhum ingresso encontrado para este CPF",
+			"code":    "not_found",
+			"tickets": []gin.H{},
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"cpf":     formatCPFDigits(cpfDigits),
+		"tickets": tickets,
+	})
+}
+
 // PatchCheckinHandler — PATCH /org/:slug/events/:id/checkin-data
 // Faz ou desfaz o check-in de um ingresso, localizado pelo token do QR code —
 // o mesmo que sai impresso no QR e no PDF oficial. Aceita tanto o token lido
@@ -260,8 +436,14 @@ func PatchCheckinHandler(c *gin.Context) {
 	db := config.GetDB()
 	ctx := c.Request.Context()
 
-	if _, err := orgservice.ResolveOrgWithAnyMember(ctx, db, orgSlug, uid); err != nil {
+	orgID, ok := resolveCheckinOrg(ctx, db, orgSlug, uid)
+	if !ok {
 		c.JSON(http.StatusForbidden, gin.H{"error": "acesso negado"})
+		return
+	}
+
+	if !eventBelongsToOrg(ctx, db, eventID, orgID) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "evento não encontrado"})
 		return
 	}
 

@@ -53,6 +53,8 @@ func Register(r *gin.Engine) {
 
 		auth.GET("/org/:slug/events/:id/checkin-data", controllers.GetCheckinDataHandler)
 		auth.PATCH("/org/:slug/events/:id/checkin-data", controllers.PatchCheckinHandler)
+		// Lookup por CPF quando o participante não tem o QR em mãos
+		auth.GET("/org/:slug/events/:id/checkin-data/lookup", controllers.GetCheckinCPFLookupHandler)
 
 		auth.GET("/org/:slug/events/:id/finance/painel", controllers.GetFinancePainelHandler)
 		auth.GET("/org/:slug/events/:id/finance/resumo", controllers.GetFinanceResumoHandler)

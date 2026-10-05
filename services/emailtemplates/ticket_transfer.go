@@ -47,18 +47,11 @@ func BuildTicketTransfer(d TransferData) (subject, html string, err error) {
 		"{{LOTE}}",            loteLabel(d.LoteNome),
 		"{{QR_CODE}}",         d.QRCode,
 		"{{CPF_REMITENTE}}",   senderLabel(d.SenderCPF),
-		"{{GUEST_ALERT}}",     guestAlert(d.GuestAccount),
+		"{{GUEST_ALERT}}",     guestAlertTransfer(d.GuestAccount),
 		"{{ATTACHMENT_NOTE}}", transferAttachmentNote(),
 	)
 
 	return subject, r.Replace(string(tmplBytes)), nil
-}
-
-func loteLabel(lote string) string {
-	if lote == "" {
-		return "Ingresso"
-	}
-	return lote
 }
 
 // senderLabel identifica o remetente.
@@ -72,18 +65,6 @@ func senderLabel(cpf string) string {
 		return "outra conta Reppy"
 	}
 	return "CPF " + cpf[0:3] + ".***.***-" + cpf[9:11]
-}
-
-// guestAlert destaca o caso em que o destinatário é uma conta de visitante.
-// Guest não tem e-mail verificado nem senha, então é o perfil onde uma
-// transferência errada passa mais tempo sem ninguém reclamar.
-func guestAlert(isGuest bool) string {
-	if !isGuest {
-		return ""
-	}
-	return `<div style="margin:0 0 20px;padding:14px 18px;background:#FFF8E1;border:1px solid #F0D68A;border-radius:12px;font-size:13px;color:#6B5A1F;line-height:1.6;">
-              ⚠️ Este ingresso foi enviado para uma conta de visitante, sem e-mail verificado. Se você não esperava este ingresso, não use o QR Code — fale com a gente.
-            </div>`
 }
 
 // transferAttachmentNote é a nota de anexo. Nome diferente do attachmentNote
