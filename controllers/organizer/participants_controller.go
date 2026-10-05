@@ -8,6 +8,9 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+// GetParticipantsHandler lista os participantes inscritos.
+// Acessível a qualquer membro da organização (owner, admin, promoter, checkin_staff),
+// pois promoter e checkin_staff precisam apenas visualizar a lista.
 func GetParticipantsHandler(c *gin.Context) {
 	orgSlug := c.Param("slug")
 	eventID := c.Param("id")
@@ -17,7 +20,7 @@ func GetParticipantsHandler(c *gin.Context) {
 	db  := config.GetDB()
 	ctx := c.Request.Context()
 
-	orgID, err := orgservice.ResolveOrgWithPermission(ctx, db, orgSlug, uid)
+	orgID, err := orgservice.ResolveOrgWithAnyMember(ctx, db, orgSlug, uid)
 	if err != nil {
 		c.JSON(http.StatusForbidden, gin.H{"error": "acesso negado"})
 		return

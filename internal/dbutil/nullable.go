@@ -1,6 +1,9 @@
 package dbutil
 
-import "strings"
+import (
+	"database/sql"
+	"strings"
+)
 
 // NullableText retorna nil para strings vazias ou só espaços,
 // compatível com COALESCE e colunas nullable no Postgres.
@@ -8,6 +11,15 @@ func NullableText(s string) *string {
 	if strings.TrimSpace(s) == "" {
 		return nil
 	}
+	return &s
+}
+
+// StrPtr converte um sql.NullString em *string (nil quando NULL).
+func StrPtr(ns sql.NullString) *string {
+	if !ns.Valid {
+		return nil
+	}
+	s := ns.String
 	return &s
 }
 

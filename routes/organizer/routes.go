@@ -67,5 +67,14 @@ func Register(r *gin.Engine) {
 		auth.POST("/org/:slug/events/:id/comunicados",           controllers.SendComunicadoHandler)
 		auth.GET("/org/:slug/events/:id/participants",              controllers.GetParticipantsHandler)
 		auth.GET("/org/:slug/events/:id/comunicados/recipients",    controllers.GetComunicadosRecipientsHandler)
+
+		// ── Lotes para emissão pelo promoter ────────────────────────────────────
+		auth.GET("/org/:slug/events/:id/batches", controllers.GetEventBatchesHandler)
+
+		// ── Promoter: emissão e histórico ───────────────────────────────────────
+		// Promoter, admin, owner (gate de role dentro dos handlers)
+		auth.POST("/org/:slug/events/:id/promoter/tickets/emit",         controllers.EmitPromoterTicketsHandler)
+		auth.GET("/org/:slug/events/:id/promoter/tickets/distributions", controllers.GetPromoterDistributionsHandler)
+		auth.GET("/org/:slug/events/:id/promoter/cpf-lookup",            controllers.GetPromoterCPFLookupHandler)
 	}
 }

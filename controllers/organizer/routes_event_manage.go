@@ -40,4 +40,13 @@ func RegisterEventManageRoutes(rg *gin.RouterGroup) {
 	// ── Participantes ─────────────────────────────────────────────────────────
 	rg.GET("/participants", GetParticipantsHandler)
 	rg.GET("/comunicados/recipients", GetComunicadosRecipientsHandler)
+
+	// ── Batches (para promoter emitir) ────────────────────────────────────────
+	// Promoter, admin, owner
+	rg.GET("/batches", GetEventBatchesHandler)
+
+	// ── Promoter Tickets ──────────────────────────────────────────────────────
+	// Promoter, admin, owner
+	rg.POST("/promoter/tickets/emit", EmitPromoterTicketsHandler)
+	rg.GET("/promoter/tickets/distributions", GetPromoterDistributionsHandler)
 }
