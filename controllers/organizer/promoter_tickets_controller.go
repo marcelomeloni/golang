@@ -42,8 +42,10 @@ func EmitPromoterTicketsHandler(c *gin.Context) {
 	db := config.GetDB()
 	ctx := c.Request.Context()
 
-	// 1. Verify organizer membership with promoter/admin/owner role
-	orgID, err := orgservice.ResolveOrgWithPermission(ctx, db, orgSlug, uid)
+	// 1. Resolve a org por qualquer membership: o gate de role (promoter,
+	// admin ou owner) é validado logo abaixo. Usar ResolveOrgWithPermission
+	// aqui rejeitaria o próprio promoter, pois ela só aceita owner/admin.
+	orgID, err := orgservice.ResolveOrgWithAnyMember(ctx, db, orgSlug, uid)
 	if err != nil {
 		c.JSON(http.StatusForbidden, gin.H{"error": "acesso negado"})
 		return
@@ -157,7 +159,8 @@ func GetPromoterCPFLookupHandler(c *gin.Context) {
 	ctx := c.Request.Context()
 
 	// Mesmo gate de permissão da emissão: promoter, admin ou owner.
-	orgID, err := orgservice.ResolveOrgWithPermission(ctx, db, orgSlug, uid)
+	// ResolveOrgWithAnyMember aceita o membership; o role é validado abaixo.
+	orgID, err := orgservice.ResolveOrgWithAnyMember(ctx, db, orgSlug, uid)
 	if err != nil {
 		c.JSON(http.StatusForbidden, gin.H{"error": "acesso negado"})
 		return
@@ -232,7 +235,9 @@ func GetPromoterDistributionsHandler(c *gin.Context) {
 	db := config.GetDB()
 	ctx := c.Request.Context()
 
-	orgID, err := orgservice.ResolveOrgWithPermission(ctx, db, orgSlug, uid)
+	// Resolve por membership e valida o role logo abaixo (promoter/admin/owner).
+	// ResolveOrgWithPermission não serve aqui: ela exige owner/admin.
+	orgID, err := orgservice.ResolveOrgWithAnyMember(ctx, db, orgSlug, uid)
 	if err != nil {
 		c.JSON(http.StatusForbidden, gin.H{"error": "acesso negado"})
 		return
