@@ -40,21 +40,6 @@ func resolveCheckinOrg(ctx context.Context, db *sql.DB, slug, uid string) (strin
 	}
 }
 
-// eventBelongsToOrg confirma que o evento da URL pertence à organização do
-// usuário. Sem essa checagem, um membro de uma org consegue ler e marcar
-// check-in em eventos de outra org só adivinhando o id na URL.
-func eventBelongsToOrg(ctx context.Context, db *sql.DB, eventID, orgID string) bool {
-	var exists bool
-	if err := db.QueryRowContext(ctx,
-		`SELECT EXISTS(SELECT 1 FROM events WHERE id = $1 AND organization_id = $2)`,
-		eventID, orgID,
-	).Scan(&exists); err != nil {
-		log.Printf("eventBelongsToOrg: %v", err)
-		return false
-	}
-	return exists
-}
-
 // nonDigitsRe casa qualquer coisa que não seja dígito.
 var nonDigitsRe = regexp.MustCompile(`\D`)
 

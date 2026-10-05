@@ -1,7 +1,6 @@
 package organizer
 
 import (
-	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -205,15 +204,6 @@ func loadEventEmailData(db *sql.DB, eventID string) (eventEmailData, error) {
 		City:     loc.City,
 		State:    loc.State,
 	}, nil
-}
-
-func eventBelongsToOrg(ctx context.Context, db *sql.DB, eventID, orgID string) bool {
-	var exists bool
-	_ = db.QueryRowContext(ctx,
-		`SELECT EXISTS(SELECT 1 FROM events WHERE id = $1 AND organization_id = $2)`,
-		eventID, orgID,
-	).Scan(&exists)
-	return exists
 }
 
 func loadComunicadoRecipients(db *sql.DB, eventID string) ([]comunicadoRecipient, error) {
