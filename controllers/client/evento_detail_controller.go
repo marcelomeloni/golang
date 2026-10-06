@@ -137,7 +137,7 @@ func GetEventDetail(c *gin.Context) {
 			SET views = views + 1
 			WHERE slug = $1 AND status = 'published'
 			RETURNING id, title, description, image_url, start_date, location, requirements,
-			          organization_id, instagram, promo_fee
+			          organization_id, instagram
 		)
 		SELECT
 			u.id,
@@ -148,7 +148,6 @@ func GetEventDetail(c *gin.Context) {
 			u.location,
 			u.requirements,
 			u.instagram,
-			u.promo_fee,
 			COALESCE(o.name, ''),
 			COALESCE(o.slug, ''),
 			COALESCE(o.logo_url, '')
@@ -162,7 +161,6 @@ func GetEventDetail(c *gin.Context) {
 		startDate                      sql.NullTime
 		locationJSON, requirementsJSON []byte
 		instagram                      sql.NullString
-		promoFee                       bool
 		orgName, orgSlug, orgLogoURL   string
 	)
 
@@ -170,7 +168,6 @@ func GetEventDetail(c *gin.Context) {
 		&id, &title, &description, &imageURL, &startDate,
 		&locationJSON, &requirementsJSON,
 		&instagram,
-		&promoFee,
 		&orgName, &orgSlug, &orgLogoURL,
 	)
 
@@ -313,7 +310,7 @@ func GetEventDetail(c *gin.Context) {
 
 			// Calcula a taxa correta para este lote específico
 			if l.FeePayer == "buyer" && l.Price > 0 {
-				l.FeePercentage = feehelper.CalcFee(l.Price, promoFee).FeePercentage
+				l.FeePercentage = feehelper.CalcFee(l.Price).FeePercentage
 			}
 
 			// Cria a categoria na primeira aparição, preservando a ordem

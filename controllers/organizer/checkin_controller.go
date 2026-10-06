@@ -40,6 +40,19 @@ func resolveCheckinOrg(ctx context.Context, db *sql.DB, slug, uid string) (strin
 	}
 }
 
+// eventCancelled diz se o evento está cancelado — nesse caso o check-in fica
+// bloqueado para todo o mundo.
+func eventCancelled(ctx context.Context, db *sql.DB, eventID string) (bool, error) {
+	var status string
+	err := db.QueryRowContext(ctx,
+		`SELECT status FROM events WHERE id = $1`, eventID,
+	).Scan(&status)
+	if err != nil {
+		return false, err
+	}
+	return status == "cancelled", nil
+}
+
 // nonDigitsRe casa qualquer coisa que não seja dígito.
 var nonDigitsRe = regexp.MustCompile(`\D`)
 
@@ -310,6 +323,14 @@ func GetCheckinCPFLookupHandler(c *gin.Context) {
 		return
 	}
 
+	if cancelled, err := eventCancelled(ctx, db, eventID); err == nil && cancelled {
+		c.JSON(http.StatusConflict, gin.H{
+			"error": "este evento está cancelado — check-in bloqueado",
+			"code":  "event_cancelled",
+		})
+		return
+	}
+
 	cpfDigits := cleanCPFDigits(c.Query("cpf"))
 	if len(cpfDigits) != 11 {
 		c.JSON(http.StatusBadRequest, gin.H{
@@ -429,6 +450,14 @@ func PatchCheckinHandler(c *gin.Context) {
 
 	if !eventBelongsToOrg(ctx, db, eventID, orgID) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "evento não encontrado"})
+		return
+	}
+
+	if cancelled, err := eventCancelled(ctx, db, eventID); err == nil && cancelled {
+		c.JSON(http.StatusConflict, gin.H{
+			"error": "este evento está cancelado — check-in bloqueado",
+			"code":  "event_cancelled",
+		})
 		return
 	}
 

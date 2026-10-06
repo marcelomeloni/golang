@@ -1,10 +1,14 @@
 package organizer
 
 import (
+	"log"
 	"net/http"
 
 	"bilheteria-api/config"
+	"bilheteria-api/services/emailsender"
+	"bilheteria-api/services/orderservice"
 	"bilheteria-api/services/orgservice"
+	"bilheteria-api/services/paymentservice"
 	"github.com/gin-gonic/gin"
 	"github.com/lib/pq"
 )
@@ -381,6 +385,48 @@ func GetCancellationsHandler(c *gin.Context) {
 	c.JSON(http.StatusOK, refunds)
 }
 
+// GetRefundCountHandler — GET /org/:slug/events/:id/cancellations/count
+// Contagem leve de solicitações pendentes, para o badge da sidebar.
+func GetRefundCountHandler(c *gin.Context) {
+	orgSlug := c.Param("slug")
+	eventID := c.Param("id")
+	userID, _ := c.Get("userID")
+	uid := userID.(string)
+
+	db := config.GetDB()
+	ctx := c.Request.Context()
+
+	orgID, err := orgservice.ResolveOrgWithPermission(ctx, db, orgSlug, uid)
+	if err != nil {
+		c.JSON(http.StatusForbidden, gin.H{"error": "acesso negado"})
+		return
+	}
+
+	var exists bool
+	_ = db.QueryRowContext(ctx,
+		`SELECT EXISTS(SELECT 1 FROM events WHERE id = $1 AND organization_id = $2)`,
+		eventID, orgID,
+	).Scan(&exists)
+	if !exists {
+		c.JSON(http.StatusNotFound, gin.H{"error": "evento não encontrado"})
+		return
+	}
+
+	var pending int
+	if err := db.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM refunds r
+		JOIN orders o ON o.id = r.order_id
+		WHERE o.event_id = $1
+		  AND r.status = 'pending'
+	`, eventID).Scan(&pending); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao contar reembolsos"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"pending": pending})
+}
+
 // PatchRefundHandler — PATCH /org/:slug/events/:id/cancellations/:refundID
 // Aprova ou rejeita um pedido de reembolso.
 func PatchRefundHandler(c *gin.Context) {
@@ -426,16 +472,87 @@ func PatchRefundHandler(c *gin.Context) {
 		newStatus = "completed"
 	}
 
-	_, err = db.ExecContext(ctx,
-		`UPDATE refunds SET status = $1
-		  WHERE id = $2
-		    AND order_id IN (SELECT id FROM orders WHERE event_id = $3)
-		    AND status = 'pending'`,
-		newStatus, refundID, eventID,
+	// Carrega a solicitação + dados do pedido para a aprovação: só é possível
+	// estornar concedendo reembolso quando há cobrança Pix associada.
+	var (
+		orderID      string
+		pixExternalID string
+		rStatus      string
 	)
+	err = db.QueryRowContext(ctx, `
+		SELECT r.order_id, COALESCE(o.pix_external_id, ''), r.status
+		FROM refunds r
+		JOIN orders o ON o.id = r.order_id
+		WHERE r.id = $1
+		  AND o.event_id = $2
+		  AND r.amount > 0
+	`, refundID, eventID).Scan(&orderID, &pixExternalID, &rStatus)
 	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "reembolso não encontrado"})
+		return
+	}
+	if rStatus != "pending" {
+		c.JSON(http.StatusConflict, gin.H{"error": "reembolso já processado"})
+		return
+	}
+
+	if body.Status == "approved" {
+		// Estorno automático na AbacatePay quando a compra foi feita via Pix.
+		// Sem pix_external_id (ex.: ingresso de promoter / fora da plataforma):
+		// o organizador resolve o estorno fora da Reppy, então apenas confirmamos
+		// o cancelamento no banco.
+		if pixExternalID != "" {
+			if paymentservice.Default == nil {
+				log.Printf("PatchRefundHandler: gateway não inicializado para orderID=%s — estorno não executado", orderID)
+				c.JSON(http.StatusBadGateway, gin.H{
+					"error": "gateway de pagamento indisponível — tente novamente",
+					"code":  "refund_failed",
+				})
+				return
+			}
+			if err := paymentservice.Default.Refund(pixExternalID, "Reembolso aprovado pelo organizador"); err != nil {
+				log.Printf("PatchRefundHandler: refund orderID=%s: %v", orderID, err)
+				c.JSON(http.StatusBadGateway, gin.H{
+					"error": "não foi possível estornar o pagamento no momento — tente novamente",
+					"code":  "refund_failed",
+				})
+				return
+			}
+		} else {
+			log.Printf("PatchRefundHandler: orderID=%s sem pix_external_id — estorno manual do organizador", orderID)
+		}
+
+		// Confirma o reembolso no banco: order -> refunded, tickets invalidadas,
+		// solicitações de reembolso do pedido -> completed.
+		if err := orderservice.MarkOrderRefunded(db, orderID, true); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao confirmar reembolso"})
+			return
+		}
+
+		go func() {
+			if err := orderservice.SendRefundStatusEmail(db, emailsender.New(""), orderID, "approved"); err != nil {
+				log.Printf("PatchRefundHandler: email aprovado orderID=%s: %v", orderID, err)
+			}
+		}()
+
+		c.JSON(http.StatusOK, gin.H{"ok": true})
+		return
+	}
+
+	// Rejeitada: só muda o status — os ingressos continuam válidos.
+	if _, err := db.ExecContext(ctx,
+		`UPDATE refunds SET status = $1 WHERE id = $2 AND status = 'pending'`,
+		newStatus, refundID,
+	); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao atualizar reembolso"})
 		return
 	}
+
+	go func() {
+		if err := orderservice.SendRefundStatusEmail(db, emailsender.New(""), orderID, "rejected"); err != nil {
+			log.Printf("PatchRefundHandler: email recusado orderID=%s: %v", orderID, err)
+		}
+	}()
+
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }

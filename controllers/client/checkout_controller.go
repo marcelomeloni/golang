@@ -60,6 +60,21 @@ func CreateOrder(c *gin.Context) {
 	userIDStr, _ := userID.(string)
 	isGuest := userIDStr == ""
 
+	// Vendas suspensas: evento cancelado/encerrado/rascunho não aceita novos pedidos.
+	var eventStatus string
+	if err := db.QueryRow(`SELECT status FROM events WHERE id = $1`, req.EventID).Scan(&eventStatus); err != nil {
+		log.Printf("CreateOrder event status: %v", err)
+		c.JSON(http.StatusNotFound, gin.H{"error": "evento não encontrado"})
+		return
+	}
+	if eventStatus != "published" {
+		c.JSON(http.StatusConflict, gin.H{
+			"error": "as vendas deste evento foram encerradas",
+			"code":  "event_not_on_sale",
+		})
+		return
+	}
+
 	buyerCPF, err := orderservice.BuyerCPF(db, userIDStr, req.BuyerCPF)
 	if err != nil {
 		log.Printf("CreateOrder BuyerCPF: %v", err)
@@ -135,7 +150,7 @@ func CreateOrder(c *gin.Context) {
 
 	var platformFeeAmount float64
 	if !allFree {
-		platformFeeAmount = orderservice.CalcPlatformFee(db, req.EventID, batches, items)
+		platformFeeAmount = orderservice.CalcPlatformFee(batches, items)
 	}
 
 	grandTotal := subtotal - discountAmount + platformFeeAmount

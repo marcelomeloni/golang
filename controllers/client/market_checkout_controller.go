@@ -33,6 +33,21 @@ func CreateMarketOrder(c *gin.Context) {
 		return
 	}
 
+	// Vendas suspensas: evento cancelado não aceita nova compra, nem no Market.
+	var eventStatus string
+	if err := db.QueryRow(`SELECT status FROM events WHERE id = $1`, listing.eventID).Scan(&eventStatus); err != nil {
+		log.Printf("CreateMarketOrder event status: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "erro interno"})
+		return
+	}
+	if eventStatus != "published" {
+		c.JSON(http.StatusConflict, gin.H{
+			"error": "as vendas deste evento foram encerradas",
+			"code":  "event_not_on_sale",
+		})
+		return
+	}
+
 	userID, _ := c.Get("userID")
 	userIDStr, _ := userID.(string)
 	isGuest := userIDStr == ""

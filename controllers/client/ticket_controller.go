@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"bilheteria-api/config"
+	"bilheteria-api/services/emailsender"
 	"bilheteria-api/services/orderservice"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -501,6 +502,10 @@ type RefundRequest struct {
 }
 
 // POST /tickets/:id/refund
+// A solicitação é feita em nível de PEDIDO: o pedido inteiro (todos os
+// ingressos) é coberto por um único reembolso, sempre pelo valor total.
+// O ingresso NÃO é cancelado aqui — só na confirmação do estorno (aprovação
+// do organizador ou webhook de estorno).
 func RequestRefund(c *gin.Context) {
 	userID, _ := c.Get("userID")
 	ticketID := c.Param("id")
@@ -510,18 +515,25 @@ func RequestRefund(c *gin.Context) {
 
 	db := config.GetDB()
 
-	var orderID string
-	var ticketPrice float64
+	// Elegibilidade: pedido pago via plataforma (com pix_external_id), cujo
+	// ingresso pertence ao comprador. Ingressos de promoter/fora da plataforma
+	// não passam por aqui — são resolvidos direto com a organização.
+	var (
+		orderID      string
+		orderTotal   float64
+		eventName    string
+	)
 	err := db.QueryRow(`
-		SELECT o.id, tb.price
+		SELECT o.id, o.total_amount, e.title
 		FROM tickets t
 		JOIN orders o ON o.id = t.order_id
-		JOIN ticket_batches tb ON tb.id = t.batch_id
+		JOIN events e ON e.id = o.event_id
 		WHERE t.id = $1
 		  AND t.user_id = $2
-		  AND t.status = 'valid'
+		  AND t.status IN ('valid', 'transferred')
 		  AND o.status = 'paid'
-	`, ticketID, userID).Scan(&orderID, &ticketPrice)
+		  AND COALESCE(o.pix_external_id, '') <> ''
+	`, ticketID, userID).Scan(&orderID, &orderTotal, &eventName)
 	if err == sql.ErrNoRows {
 		c.JSON(http.StatusNotFound, gin.H{"error": "ingresso não encontrado ou não elegível para reembolso"})
 		return
@@ -536,7 +548,7 @@ func RequestRefund(c *gin.Context) {
 	var pendingCount int
 	db.QueryRow(`SELECT COUNT(*) FROM refunds WHERE order_id = $1 AND status = 'pending'`, orderID).Scan(&pendingCount)
 	if pendingCount > 0 {
-		c.JSON(http.StatusConflict, gin.H{"error": "já existe uma solicitação de reembolso pendente para este ingresso"})
+		c.JSON(http.StatusConflict, gin.H{"error": "já existe uma solicitação de reembolso pendente para este pedido"})
 		return
 	}
 
@@ -551,17 +563,10 @@ func RequestRefund(c *gin.Context) {
 	_, err = tx.Exec(`
 		INSERT INTO refunds (id, order_id, amount, reason, status, created_at)
 		VALUES ($1, $2, $3, $4, 'pending', $5)
-	`, refundID, orderID, ticketPrice, req.Reason, time.Now())
+	`, refundID, orderID, orderTotal, req.Reason, time.Now())
 	if err != nil {
 		log.Printf("RequestRefund insert: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao solicitar reembolso"})
-		return
-	}
-
-	_, err = tx.Exec(`UPDATE tickets SET status = 'cancelled' WHERE id = $1`, ticketID)
-	if err != nil {
-		log.Printf("RequestRefund cancel ticket: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao cancelar ingresso"})
 		return
 	}
 
@@ -570,11 +575,21 @@ func RequestRefund(c *gin.Context) {
 		return
 	}
 
+	// Avisa o comprador que o pedido foi recebido e está em análise.
+	go func() {
+		sender := emailsender.New("")
+		if err := orderservice.SendRefundStatusEmail(db, sender, orderID, "received"); err != nil {
+			log.Printf("RequestRefund email: orderID=%s: %v", orderID, err)
+		}
+	}()
+
 	c.JSON(http.StatusCreated, gin.H{
-		"id":      refundID,
-		"amount":  ticketPrice,
-		"status":  "pending",
-		"message": "solicitação de reembolso registrada",
+		"id":       refundID,
+		"order_id": orderID,
+		"amount":   orderTotal,
+		"status":   "pending",
+		"event":    eventName,
+		"message":  "solicitação de reembolso registrada — o pedido inteiro será reembolsado na aprovação",
 	})
 }
 

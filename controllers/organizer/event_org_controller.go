@@ -5,14 +5,17 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"log"
 	"net/http"
 	"strings"
 	"time"
 
 	"bilheteria-api/config"
 	"bilheteria-api/internal/dbutil"
+	"bilheteria-api/services/emailsender"
 	"bilheteria-api/services/eventservice"
 	"bilheteria-api/services/geocoding"
+	"bilheteria-api/services/orderservice"
 	"bilheteria-api/services/orgservice"
 	"bilheteria-api/services/storage"
 	"github.com/gin-gonic/gin"
@@ -307,12 +310,47 @@ func CancelEventHandler(c *gin.Context) {
 		}
 	}
 
-	if _, err := db.ExecContext(ctx,
+	tx, err := db.Begin()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao cancelar evento"})
+		return
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx,
 		`UPDATE events SET status = 'cancelled', updated_at = now() WHERE id = $1`, eventID,
 	); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao cancelar evento"})
 		return
 	}
+
+	// Fecha os lotes de venda e retira os anúncios do Reppy Market do ar.
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE ticket_batches SET status = 'inactive', updated_at = now() WHERE event_id = $1 AND status = 'active'`,
+		eventID,
+	); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao encerrar lotes"})
+		return
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE market_listings SET status = 'canceled', updated_at = now() WHERE event_id = $1 AND status = 'active'`,
+		eventID,
+	); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao encerrar anúncios"})
+		return
+	}
+
+	if err := tx.Commit(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao cancelar evento"})
+		return
+	}
+
+	// Notifica os compradores (pedidos pagos) sobre o cancelamento e reembolso.
+	go func() {
+		if err := orderservice.SendEventCancelledEmails(db, emailsender.New(""), eventID); err != nil {
+			log.Printf("CancelEventHandler: email cancelamento eventID=%s: %v", eventID, err)
+		}
+	}()
 
 	c.JSON(http.StatusOK, gin.H{"message": "evento cancelado", "tickets_sold": ticketsSold})
 }

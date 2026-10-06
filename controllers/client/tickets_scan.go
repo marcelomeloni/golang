@@ -107,6 +107,10 @@ func scanTicketRow(scan func(...any) error, loc *time.Location) (MyTicket, error
 		isListed          bool
 		listingID         sql.NullString
 		listingPrice      sql.NullFloat64
+		eventStatus       string
+		orderID           string
+		orderTotal        float64
+		refundStatus      sql.NullString
 	)
 
 	err := scan(
@@ -119,6 +123,10 @@ func scanTicketRow(scan func(...any) error, loc *time.Location) (MyTicket, error
 		&isListed,
 		&listingID,
 		&listingPrice,
+		&eventStatus,
+		&orderID,
+		&orderTotal,
+		&refundStatus,
 	)
 	if err != nil {
 		return MyTicket{}, err
@@ -150,6 +158,12 @@ func scanTicketRow(scan func(...any) error, loc *time.Location) (MyTicket, error
 		startDateRaw = &t
 	}
 
+	var refundStatusPtr *string
+	if refundStatus.Valid {
+		v := refundStatus.String
+		refundStatusPtr = &v
+	}
+
 	return MyTicket{
 		ID:                id,
 		EventID:           eventID,
@@ -165,6 +179,10 @@ func scanTicketRow(scan func(...any) error, loc *time.Location) (MyTicket, error
 		ListingPrice:      listingPricePtr,
 		DaysUntil:         calcDaysUntil(startDate, loc),
 		StartDateRaw:      startDateRaw,
+		EventStatus:       eventStatus,
+		OrderID:           orderID,
+		OrderTotal:        orderTotal,
+		RefundStatus:      refundStatusPtr,
 		Evento: MyTicketEvent{
 			Slug:         slug,
 			Nome:         title,

@@ -3,24 +3,18 @@ package feehelper
 // AbacatePayFixedCost é o custo fixo por transação cobrado pelo gateway (em reais).
 const AbacatePayFixedCost = 0.80
 
-type tierFee struct {
-	maxPrice   float64
-	percentage float64
-}
+// MinimumFee é o piso absoluto por ingresso: nunca cobramos menos que o custo do gateway.
+const MinimumFee = 0.80
 
-var tiers = []tierFee{
-	{maxPrice: 10.00, percentage: 0.10},
-	{maxPrice: 14.99, percentage: 0.08},
-	{maxPrice: 0, percentage: 0.07},
-}
+// FeeLowPriceThreshold é o limite de preço abaixo do qual aplicamos a taxa maior (10%).
+const FeeLowPriceThreshold = 10.00
 
-var promoTiers = []tierFee{
-	{maxPrice: 10.00, percentage: 0.10},
-	{maxPrice: 15.00, percentage: 0.08},
-	{maxPrice: 24.99, percentage: 0.06},
-	{maxPrice: 49.99, percentage: 0.05},
-	{maxPrice: 0, percentage: 0.04},
-}
+const (
+	// StandardFeePercentage é a taxa para ingressos acima do limite (R$10).
+	StandardFeePercentage = 0.08
+	// LowPricePercentage é a taxa para ingressos até o limite (R$10), garantindo margem acima do piso.
+	LowPricePercentage = 0.10
+)
 
 type FeeResult struct {
 	TicketPrice   float64
@@ -29,58 +23,35 @@ type FeeResult struct {
 	GatewayFee    float64
 	NetMargin     float64
 	FinalPrice    float64
-	IsPromo       bool
 }
 
-func CalcFee(ticketPriceBRL float64, isPromo bool) FeeResult {
-	t := selectTier(ticketPriceBRL, isPromo)
-	feeAmount := ticketPriceBRL * t.percentage
-	netMargin := feeAmount - AbacatePayFixedCost
+func CalcFee(ticketPriceBRL float64) FeeResult {
+	if ticketPriceBRL <= 0 {
+		return FeeResult{TicketPrice: ticketPriceBRL}
+	}
+
+	percentage := StandardFeePercentage
+	if ticketPriceBRL <= FeeLowPriceThreshold {
+		percentage = LowPricePercentage
+	}
+
+	feeAmount := ticketPriceBRL * percentage
+	if feeAmount < MinimumFee {
+		feeAmount = MinimumFee
+	}
+	feeAmount = Round2(feeAmount)
+
 	return FeeResult{
-		TicketPrice:   ticketPriceBRL,
-		FeePercentage: t.percentage,
-		FeeAmount:     Round2(feeAmount),
+		TicketPrice:   Round2(ticketPriceBRL),
+		FeePercentage: Round2(feeAmount / ticketPriceBRL),
+		FeeAmount:     feeAmount,
 		GatewayFee:    AbacatePayFixedCost,
-		NetMargin:     Round2(netMargin),
+		NetMargin:     Round2(feeAmount - AbacatePayFixedCost),
 		FinalPrice:    Round2(ticketPriceBRL + feeAmount),
-		IsPromo:       isPromo,
 	}
-}
-
-func CalcOrderFee(ticketPrices []float64, isPromo bool) (totalFee float64, totalMargin float64) {
-	for _, price := range ticketPrices {
-		r := CalcFee(price, isPromo)
-		totalFee += r.FeeAmount
-		totalMargin += r.NetMargin
-	}
-	return Round2(totalFee), Round2(totalMargin)
-}
-
-func IsAboveFloor(ticketPriceBRL float64, isPromo bool) bool {
-	return CalcFee(ticketPriceBRL, isPromo).NetMargin >= 0
-}
-
-func FloorPercentage(ticketPriceBRL float64) float64 {
-	if ticketPriceBRL == 0 {
-		return 0
-	}
-	return Round2(AbacatePayFixedCost / ticketPriceBRL)
 }
 
 // Round2 arredonda para 2 casas decimais. Exportada para uso em outros pacotes.
 func Round2(v float64) float64 {
 	return float64(int(v*100+0.5)) / 100
-}
-
-func selectTier(price float64, isPromo bool) tierFee {
-	ts := tiers
-	if isPromo {
-		ts = promoTiers
-	}
-	for _, t := range ts {
-		if t.maxPrice == 0 || price <= t.maxPrice {
-			return t
-		}
-	}
-	return ts[len(ts)-1]
 }

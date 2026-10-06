@@ -12,6 +12,7 @@ import (
 
 const (
 	abacateBaseURL  = "https://api.abacatepay.com/v1"
+	abacateV2Base   = "https://api.abacatepay.com/v2"
 	pixExpiresInSec = 900
 )
 
@@ -65,6 +66,18 @@ type abacateWithdrawRequest struct {
 type abacateWithdrawResponse struct {
 	Data  any `json:"data"`
 	Error any `json:"error"`
+}
+
+type abacateRefundRequest struct {
+	ID     string `json:"id"`
+	Reason string `json:"reason,omitempty"`
+}
+
+type abacateRefundResponse struct {
+	Data any `json:"data"`
+	// Error vem como string (ex.: "TRANSACTION_NOT_REFUNDABLE") ou null.
+	Error   any    `json:"error"`
+	Success bool   `json:"success"`
 }
 
 type abacateGateway struct {
@@ -186,6 +199,58 @@ func (g *abacateGateway) Withdraw(referenceID string, amountBRL float64, pixKey 
 	}
 
 	return nil
+}
+
+// Refund estorna integralmente uma cobrança já paga.
+//
+// A API v1 da AbacatePay não expõe estorno (só notifica via webhook
+// `billing.refunded`, disparado quando o estorno é feito no painel deles).
+// Usamos o endpoint v2 `POST /checkouts/refund`, que aceita o mesmo
+// `pix_char_...` gerado em `/pixQrCode/create`.
+//
+// Regras da AbacatePay: reembolso apenas total, transação precisa estar paga,
+// valor debitado do saldo da loja. Estornar duas vezes não cria outro
+// reembolso — tratamos esse caso como sucesso (idempotente).
+func (g *abacateGateway) Refund(externalID, reason string) error {
+	payload := abacateRefundRequest{ID: externalID, Reason: reason}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("abacatepay refund marshal: %w", err)
+	}
+
+	req, err := http.NewRequest(http.MethodPost, abacateV2Base+"/checkouts/refund", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	g.setAuthHeader(req)
+
+	resp, err := g.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("abacatepay refund: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("abacatepay refund read: %w", err)
+	}
+
+	var parsed abacateRefundResponse
+	_ = json.Unmarshal(respBody, &parsed)
+
+	if resp.StatusCode == http.StatusOK && parsed.Success {
+		return nil
+	}
+
+	// Já reembolsada → nada a fazer (idempotência).
+	if resp.StatusCode == http.StatusBadRequest &&
+		strings.Contains(strings.ToLower(string(respBody)), "reembolsada") {
+		return nil
+	}
+
+	return fmt.Errorf("abacatepay refund status %d: %s", resp.StatusCode, respBody)
 }
 
 func (g *abacateGateway) post(path string, body any) ([]byte, error) {

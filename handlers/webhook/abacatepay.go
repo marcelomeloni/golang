@@ -10,6 +10,7 @@ import (
 
 	"bilheteria-api/config"
 	"bilheteria-api/services/orderservice"
+	"bilheteria-api/services/paymentservice"
 	"github.com/gin-gonic/gin"
 )
 
@@ -58,7 +59,9 @@ func AbacatePayWebhook(c *gin.Context) {
 	switch payload.Event {
 	case "billing.paid":
 		handleBillingPaid(c, config.GetDB(), payload.Data)
-	case "billing.refunded":
+	case "billing.refunded", "checkout.refunded":
+		// billing.refunded = estorno notificado pela API v1 (painel AbacatePay).
+		// checkout.refunded = mesmo evento, mas notificado pela API v2.
 		handleBillingRefunded(c, config.GetDB(), payload.Data)
 	default:
 		log.Printf("AbacatePayWebhook: evento desconhecido=%s — ignorando", payload.Event)
@@ -96,6 +99,18 @@ func handleBillingPaid(c *gin.Context, db *sql.DB, raw json.RawMessage) {
 			return
 		}
 		log.Printf("handleBillingPaid: fallback encontrou orderID=%s", orderID)
+	}
+
+	// Pagamento de evento cancelado/encerrado: não emite ingresso — marca o
+	// pedido como cancelado e devolve o dinheiro automaticamente.
+	if cancelledEvent(db, orderID) {
+		log.Printf("handleBillingPaid: orderID=%s pertence a evento não publicado — cancelando pedido e estornando", orderID)
+		if cancelPaidOrderAndRefund(db, orderID, data.PixQrCode.ID, "Pagamento de evento cancelado") {
+			c.Status(http.StatusOK)
+			return
+		}
+		// Estorno não executado: segue o fluxo normal (order -> paid, ingressos
+		// emitidos). O comprador solicita o reembolso pela via padrão.
 	}
 
 	tx, err := db.Begin()
@@ -137,6 +152,75 @@ func handleBillingPaid(c *gin.Context, db *sql.DB, raw json.RawMessage) {
 	c.Status(http.StatusOK)
 }
 
+// cancelledEvent diz se o pedido pertence a um evento que não está mais à venda.
+func cancelledEvent(db *sql.DB, orderID string) bool {
+	var status string
+	err := db.QueryRow(`
+		SELECT e.status
+		FROM events e
+		JOIN orders o ON o.event_id = e.id
+		WHERE o.id = $1
+	`, orderID).Scan(&status)
+	if err != nil {
+		// Sem evento associado (ou pedido inexistente): não bloqueia o pagamento.
+		log.Printf("cancelledEvent: orderID=%s: %v", orderID, err)
+		return false
+	}
+	return status != "published"
+}
+
+// cancelPaidOrderAndRefund estorna automaticamente um pedido pago de um evento
+// que não está mais publicado, e só então cancela o pedido/ingressos.
+//
+// Retorna true quando o pedido foi cancelado. Se o estorno não puder ser
+// executado (gateway indisponível, erro da API), devolve false e NÃO cancela: o
+// fluxo normal de billing.paid segue (order -> paid, ingressos emitidos) e o
+// comprador solicita o reembolso pela via padrão.
+func cancelPaidOrderAndRefund(db *sql.DB, orderID, pixExternalID, reason string) bool {
+	if pixExternalID == "" {
+		_ = db.QueryRow(`SELECT pix_external_id FROM orders WHERE id = $1`, orderID).Scan(&pixExternalID)
+	}
+	if pixExternalID == "" {
+		log.Printf("cancelPaidOrderAndRefund: orderID=%s sem pix_external_id — estorno manual necessário", orderID)
+		return false
+	}
+
+	if paymentservice.Default == nil {
+		log.Printf("cancelPaidOrderAndRefund: gateway não inicializado — estorno manual necessário, pedido será tratado como pago")
+		return false
+	}
+	if err := paymentservice.Default.Refund(pixExternalID, reason); err != nil {
+		log.Printf("cancelPaidOrderAndRefund: refund orderID=%s: %v (mantendo pedido como pago e emitindo ingressos)", orderID, err)
+		return false
+	}
+	log.Printf("cancelPaidOrderAndRefund: orderID=%s estornado ✓ — cancelando pedido", orderID)
+
+	tx, err := db.Begin()
+	if err != nil {
+		log.Printf("cancelPaidOrderAndRefund: begin orderID=%s: %v", orderID, err)
+		return false
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec(`UPDATE orders SET status = 'cancelled', updated_at = NOW() WHERE id = $1`, orderID); err != nil {
+		log.Printf("cancelPaidOrderAndRefund: update order orderID=%s: %v", orderID, err)
+		return false
+	}
+	if _, err := tx.Exec(`UPDATE tickets SET status = 'cancelled' WHERE order_id = $1`, orderID); err != nil {
+		log.Printf("cancelPaidOrderAndRefund: cancel tickets orderID=%s: %v", orderID, err)
+		return false
+	}
+	cancelMarketTransactionIfExists(tx, orderID)
+
+	if err := tx.Commit(); err != nil {
+		log.Printf("cancelPaidOrderAndRefund: commit orderID=%s: %v", orderID, err)
+		return false
+	}
+
+	log.Printf("cancelPaidOrderAndRefund: orderID=%s cancelado após estorno ✓", orderID)
+	return true
+}
+
 func handleBillingRefunded(c *gin.Context, db *sql.DB, raw json.RawMessage) {
 	log.Printf("handleBillingRefunded: raw data=%s", string(raw))
 
@@ -154,6 +238,11 @@ func handleBillingRefunded(c *gin.Context, db *sql.DB, raw json.RawMessage) {
 	if orderID == "" {
 		_ = db.QueryRow(`SELECT id FROM orders WHERE pix_external_id = $1`, data.PixQrCode.ID).Scan(&orderID)
 		log.Printf("handleBillingRefunded: fallback orderID=%q", orderID)
+	}
+	if orderID == "" {
+		// Evento v2 (checkout.refunded) pode não trazer pixQrCode — tenta
+		// localizar o pedido pelos IDs presentes no payload cru.
+		orderID = findOrderIDInPayload(db, raw)
 	}
 	if orderID == "" {
 		log.Printf("handleBillingRefunded: orderID não encontrado — abortando")
@@ -185,6 +274,14 @@ func handleBillingRefunded(c *gin.Context, db *sql.DB, raw json.RawMessage) {
 		return
 	}
 
+	// Fecha as solicitações de reembolso abertas deste pedido.
+	if _, err := tx.Exec(`
+		UPDATE refunds SET status = 'completed'
+		WHERE order_id = $1 AND status IN ('pending', 'refunding')
+	`, orderID); err != nil {
+		log.Printf("handleBillingRefunded: update refunds: %v", err)
+	}
+
 	cancelMarketTransactionIfExists(tx, orderID)
 
 	if err := tx.Commit(); err != nil {
@@ -195,6 +292,49 @@ func handleBillingRefunded(c *gin.Context, db *sql.DB, raw json.RawMessage) {
 
 	log.Printf("handleBillingRefunded: orderID=%s reembolsado ✓", orderID)
 	c.Status(http.StatusOK)
+}
+
+// findOrderIDInPayload varre o payload cru (webhook v2 tem formato diferente do
+// v1) procurando o pedido por `order_id` ou pelo id da cobrança (`pix_char_...`).
+func findOrderIDInPayload(db *sql.DB, raw json.RawMessage) string {
+	var anyPayload any
+	if err := json.Unmarshal(raw, &anyPayload); err != nil {
+		return ""
+	}
+
+	var candidates []string
+	var walk func(v any)
+	walk = func(v any) {
+		switch t := v.(type) {
+		case string:
+			candidates = append(candidates, t)
+		case []any:
+			for _, item := range t {
+				walk(item)
+			}
+		case map[string]any:
+			for key, item := range t {
+				if key == "order_id" {
+					if s, ok := item.(string); ok && s != "" {
+						candidates = append(candidates, s)
+					}
+				}
+				walk(item)
+			}
+		}
+	}
+	walk(anyPayload)
+
+	for _, cand := range candidates {
+		var orderID string
+		if err := db.QueryRow(`SELECT id FROM orders WHERE id = $1`, cand).Scan(&orderID); err == nil {
+			return orderID
+		}
+		if err := db.QueryRow(`SELECT id FROM orders WHERE pix_external_id = $1`, cand).Scan(&orderID); err == nil {
+			return orderID
+		}
+	}
+	return ""
 }
 
 // processMarketTransactionIfExists cria o ticket do comprador, transfere o ingresso

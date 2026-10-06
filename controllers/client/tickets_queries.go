@@ -33,6 +33,10 @@ type MyTicket struct {
 	ListingPrice      *float64      `json:"listingPrice"`
 	DaysUntil         *int          `json:"daysUntil"`
 	StartDateRaw      *time.Time    `json:"-"`
+	EventStatus       string        `json:"eventStatus"`
+	OrderID           string        `json:"orderId"`
+	OrderTotal        float64       `json:"orderTotal"`
+	RefundStatus      *string       `json:"refundStatus"`
 	Evento            MyTicketEvent `json:"evento"`
 }
 
@@ -75,7 +79,16 @@ const myTicketsQuery = `
 			SELECT ml.price FROM market_listings ml
 			WHERE ml.ticket_id = t.id AND ml.status = 'active'
 			LIMIT 1
-		) AS listing_price
+		) AS listing_price,
+		e.status AS event_status,
+		o.id     AS order_id,
+		o.total_amount AS order_total,
+		(
+			SELECT r.status FROM refunds r
+			WHERE r.order_id = o.id
+			ORDER BY r.created_at DESC
+			LIMIT 1
+		) AS refund_status
 	FROM tickets t
 	JOIN orders          o  ON o.id  = t.order_id
 	JOIN events          e  ON e.id  = o.event_id
@@ -125,7 +138,16 @@ const singleTicketQuery = `
 			SELECT ml.price FROM market_listings ml
 			WHERE ml.ticket_id = t.id AND ml.status = 'active'
 			LIMIT 1
-		) AS listing_price
+		) AS listing_price,
+		e.status AS event_status,
+		o.id     AS order_id,
+		o.total_amount AS order_total,
+		(
+			SELECT r.status FROM refunds r
+			WHERE r.order_id = o.id
+			ORDER BY r.created_at DESC
+			LIMIT 1
+		) AS refund_status
 	FROM tickets t
 	JOIN orders          o  ON o.id  = t.order_id
 	JOIN events          e  ON e.id  = o.event_id
