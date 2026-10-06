@@ -40,6 +40,7 @@ func Register(r *gin.Engine) {
 			authed.PATCH("/users/:userId/pix-key", client.UpdatePixKey)
 
 			authed.GET("/my-tickets", client.GetMyTickets)
+			authed.GET("/my-tickets/:id/qr", client.GetTicketQRCode)
 			authed.GET("/my-tickets/:id/download", client.DownloadTicket)
 
 			authed.POST("/organizers/:slug/follow", client.FollowOrganizer)

@@ -39,6 +39,32 @@ func GetMyTickets(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"proximos": proximos, "passados": passados})
 }
 
+// GetTicketQRCode — GET /client/my-tickets/:id/qr
+// Devolve o mesmo QR code gerado para o PDF oficial (go-qrcode, Medium, 256px)
+// em base64. O front usa isso para exibir no modal garantindo paridade visual.
+func GetTicketQRCode(c *gin.Context) {
+	userID, exists := c.Get("userID")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "não autenticado"})
+		return
+	}
+
+	row := config.GetDB().QueryRow(singleTicketQuery, c.Param("id"), userID)
+	ticket, err := scanSingleTicket(row)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "ingresso não encontrado"})
+		return
+	}
+
+	png, err := qrcode.Encode(ticket.QRCode, qrcode.Medium, 256)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao gerar QR"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"qrCodeBase64": base64.StdEncoding.EncodeToString(png)})
+}
+
 func DownloadTicket(c *gin.Context) {
 	userID, exists := c.Get("userID")
 	if !exists {
