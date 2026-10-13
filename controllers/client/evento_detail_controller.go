@@ -47,6 +47,7 @@ type OrganizerData struct {
 
 type Address struct {
 	Street       string `json:"street"`
+	Number       string `json:"number"`
 	City         string `json:"city"`
 	State        string `json:"state"`
 	ZipCode      string `json:"zipCode"`
@@ -104,6 +105,7 @@ type MarketLot struct {
 type DBLocation struct {
 	VenueName    string `json:"venue_name"`
 	Street       string `json:"street"`
+	Number       string `json:"number"`
 	City         string `json:"city"`
 	State        string `json:"state"`
 	Cep          string `json:"cep"`
@@ -240,6 +242,7 @@ func GetEventDetail(c *gin.Context) {
 		LocationName: locData.VenueName,
 		Address: Address{
 			Street:       locData.Street,
+			Number:       locData.Number,
 			City:         locData.City,
 			State:        locData.State,
 			ZipCode:      locData.Cep,
