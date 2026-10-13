@@ -236,7 +236,7 @@ func CreatePayoutRequestHandler(c *gin.Context) {
 		nullIfEmpty(pixKey), nullIfEmpty(pixKeyType),
 		nullIfEmpty(holderName), nullIfEmpty(holderDocument),
 		req.Note,
-	)
+	).Scan(&id)
 	if err != nil {
 		log.Printf("CreatePayoutRequest insert: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao criar solicitação"})
