@@ -38,6 +38,11 @@ func Register(r *gin.Engine) {
 
 		auth.GET("/org/:slug/overview", controllers.GetOrgOverviewHandler)
 
+		// ── Saldo e repasses ──────────────────────────────────────────────────
+		auth.GET("/org/:slug/balance",          controllers.GetOrgBalanceHandler)
+		auth.GET("/org/:slug/payout-requests",  controllers.GetPayoutRequestsHandler)
+		auth.POST("/org/:slug/payout-requests", controllers.CreatePayoutRequestHandler)
+
 		// ── Eventos ───────────────────────────────────────────────────────────
 		auth.GET("/org/:slug/events",      controllers.GetOrgEventsHandler)
 		auth.POST("/org/:slug/events",     controllers.SaveDraftHandler)

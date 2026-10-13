@@ -150,7 +150,8 @@ func GetEventDetail(c *gin.Context) {
 			u.instagram,
 			COALESCE(o.name, ''),
 			COALESCE(o.slug, ''),
-			COALESCE(o.logo_url, '')
+			COALESCE(o.logo_url, ''),
+			COALESCE(o.platform_fee_percentage, 8.00)
 		FROM updated u
 		LEFT JOIN organizations o ON u.organization_id = o.id;
 	`
@@ -162,13 +163,14 @@ func GetEventDetail(c *gin.Context) {
 		locationJSON, requirementsJSON []byte
 		instagram                      sql.NullString
 		orgName, orgSlug, orgLogoURL   string
+		orgFeePct                      float64
 	)
 
 	err := db.QueryRow(queryEvent, slug).Scan(
 		&id, &title, &description, &imageURL, &startDate,
 		&locationJSON, &requirementsJSON,
 		&instagram,
-		&orgName, &orgSlug, &orgLogoURL,
+		&orgName, &orgSlug, &orgLogoURL, &orgFeePct,
 	)
 
 	if err == sql.ErrNoRows {
@@ -310,7 +312,7 @@ func GetEventDetail(c *gin.Context) {
 
 			// Calcula a taxa correta para este lote específico
 			if l.FeePayer == "buyer" && l.Price > 0 {
-				l.FeePercentage = feehelper.CalcFee(l.Price).FeePercentage
+				l.FeePercentage = feehelper.CalcFee(l.Price, orgFeePct/100).FeePercentage
 			}
 
 			// Cria a categoria na primeira aparição, preservando a ordem

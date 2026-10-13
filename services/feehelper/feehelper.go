@@ -25,12 +25,22 @@ type FeeResult struct {
 	FinalPrice    float64
 }
 
-func CalcFee(ticketPriceBRL float64) FeeResult {
+// CalcFee calcula a taxa de um ingresso.
+//
+// orgPercentage é o percentual da organização como fração (ex.: 0.08 = 8%),
+// vindo de organizations.platform_fee_percentage. Se <= 0, cai no padrão
+// global (StandardFeePercentage). Ingressos até FeeLowPriceThreshold mantêm
+// LowPricePercentage (10%), independente da organização, e o piso MinimumFee
+// é sempre respeitado.
+func CalcFee(ticketPriceBRL, orgPercentage float64) FeeResult {
 	if ticketPriceBRL <= 0 {
 		return FeeResult{TicketPrice: ticketPriceBRL}
 	}
 
-	percentage := StandardFeePercentage
+	percentage := orgPercentage
+	if percentage <= 0 {
+		percentage = StandardFeePercentage
+	}
 	if ticketPriceBRL <= FeeLowPriceThreshold {
 		percentage = LowPricePercentage
 	}

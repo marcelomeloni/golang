@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"bilheteria-api/services/couponservice"
+	"bilheteria-api/services/feehelper"
 )
 
 type GuestInfo struct {
@@ -77,6 +78,22 @@ func LoadBatches(db *sql.DB, eventID string, lotIDs []string) (map[string]BatchI
 		batches[b.ID] = b
 	}
 	return batches, rows.Err()
+}
+
+// LoadOrgPercentage devolve o percentual de taxa da organização dona do evento
+// como fração (ex.: 0.08 = 8%). Cai no padrão global quando a coluna é NULL ou
+// quando o evento não tem organização.
+func LoadOrgPercentage(db *sql.DB, eventID string) float64 {
+	var p sql.NullFloat64
+	err := db.QueryRow(`
+		SELECT o.platform_fee_percentage
+		FROM events e
+		JOIN organizations o ON o.id = e.organization_id
+		WHERE e.id = $1`, eventID).Scan(&p)
+	if err != nil || !p.Valid {
+		return feehelper.StandardFeePercentage
+	}
+	return p.Float64 / 100
 }
 
 func ValidateItems(batches map[string]BatchInfo, items []OrderItem) string {

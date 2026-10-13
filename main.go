@@ -12,6 +12,7 @@ import (
 	clientControllers "bilheteria-api/controllers/client"
 
 	// Import das Rotas
+	adminRoutes "bilheteria-api/routes/admin"
 	clientRoutes "bilheteria-api/routes/client"
 	organizerRoutes "bilheteria-api/routes/organizer"
 	webhookRoutes "bilheteria-api/routes/webhooks"
@@ -65,6 +66,7 @@ func main() {
 	organizerRoutes.Register(r)
 	clientRoutes.Register(r)
 	webhookRoutes.Register(r)
+	adminRoutes.Register(r)
 
 	port := os.Getenv("PORT")
 	if port == "" {

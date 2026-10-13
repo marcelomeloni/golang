@@ -149,11 +149,17 @@ func CreateOrder(c *gin.Context) {
 	}
 
 	var platformFeeAmount float64
+	buyerFee := 0.0
 	if !allFree {
-		platformFeeAmount = orderservice.CalcPlatformFee(batches, items)
+		orgPercentage := orderservice.LoadOrgPercentage(db, req.EventID)
+		// buyerFee = parcela paga pelo comprador (fee_payer = "buyer");
+		// totalFee  = toda a taxa arrecadada (vai para orders.platform_fee_amount).
+		buyerFee, platformFeeAmount = orderservice.CalcPlatformFees(batches, items, orgPercentage)
 	}
 
-	grandTotal := subtotal - discountAmount + platformFeeAmount
+	// Só a taxa do comprador é somada ao total; a taxa da organização é
+	// descontada do repasse (Persist grava net_amount = grandTotal - totalFee).
+	grandTotal := subtotal - discountAmount + buyerFee
 	if grandTotal < 0 {
 		grandTotal = 0
 	}
