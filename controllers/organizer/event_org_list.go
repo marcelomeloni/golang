@@ -148,6 +148,7 @@ func GetOrgEventDetailHandler(c *gin.Context) {
 		   tb.status,
 		   tb.fee_payer,
 		   tb.sales_trigger,
+		   tb.previous_batch_id,
 		   tb.min_purchase,
 		   tb.max_purchase,
 		   to_char(tb.start_date, 'YYYY-MM-DD"T"HH24:MI:SS'),
@@ -164,18 +165,19 @@ func GetOrgEventDetailHandler(c *gin.Context) {
 	defer rows.Close()
 
 	type lotAgg struct {
-		ID            string
-		Name          string
-		Price         float64
-		QuantityTotal int
-		QuantitySold  int
-		Status        string
-		FeePayer      string
-		SalesTrigger  string
-		MinPurchase   int
-		MaxPurchase   int
-		StartDate     *string
-		EndDate       *string
+		ID              string
+		Name            string
+		Price           float64
+		QuantityTotal   int
+		QuantitySold    int
+		Status          string
+		FeePayer        string
+		SalesTrigger    string
+		PreviousBatchID *string
+		MinPurchase     int
+		MaxPurchase     int
+		StartDate       *string
+		EndDate         *string
 	}
 	type catAgg struct {
 		ID             string
@@ -199,6 +201,7 @@ func GetOrgEventDetailHandler(c *gin.Context) {
 			position                              int
 			batchID, batchName                    *string
 			batchStatus, feePayer, salesTrigger   *string
+			previousBatchID                       *string
 			price                                 *float64
 			qtyTotal, qtySold, minP, maxP         *int
 			bStart, bEnd                          *string
@@ -208,7 +211,7 @@ func GetOrgEventDetailHandler(c *gin.Context) {
 			&isTransferable, &inMarket, &position,
 			&batchID, &batchName, &price,
 			&qtyTotal, &qtySold, &batchStatus,
-			&feePayer, &salesTrigger,
+			&feePayer, &salesTrigger, &previousBatchID,
 			&minP, &maxP, &bStart, &bEnd,
 		); err != nil {
 			continue
@@ -225,18 +228,19 @@ func GetOrgEventDetailHandler(c *gin.Context) {
 
 		if batchID != nil {
 			cats[catID].Lots = append(cats[catID].Lots, lotAgg{
-				ID:            *batchID,
-				Name:          dbutil.StrVal(batchName),
-				Price:         dbutil.FloatVal(price),
-				QuantityTotal: dbutil.IntVal(qtyTotal),
-				QuantitySold:  dbutil.IntVal(qtySold),
-				Status:        dbutil.StrVal(batchStatus),
-				FeePayer:      dbutil.StrVal(feePayer),
-				SalesTrigger:  dbutil.StrVal(salesTrigger),
-				MinPurchase:   dbutil.IntVal(minP),
-				MaxPurchase:   dbutil.IntVal(maxP),
-				StartDate:     bStart,
-				EndDate:       bEnd,
+				ID:              *batchID,
+				Name:            dbutil.StrVal(batchName),
+				Price:           dbutil.FloatVal(price),
+				QuantityTotal:   dbutil.IntVal(qtyTotal),
+				QuantitySold:    dbutil.IntVal(qtySold),
+				Status:          dbutil.StrVal(batchStatus),
+				FeePayer:        dbutil.StrVal(feePayer),
+				SalesTrigger:    dbutil.StrVal(salesTrigger),
+				PreviousBatchID: previousBatchID,
+				MinPurchase:     dbutil.IntVal(minP),
+				MaxPurchase:     dbutil.IntVal(maxP),
+				StartDate:       bStart,
+				EndDate:         bEnd,
 			})
 		}
 	}
@@ -255,6 +259,7 @@ func GetOrgEventDetailHandler(c *gin.Context) {
 				"status":         l.Status,
 				"fee_payer":      l.FeePayer,
 				"sales_trigger":  l.SalesTrigger,
+				"trigger_lot_id": dbutil.StrVal(l.PreviousBatchID),
 				"min_purchase":   l.MinPurchase,
 				"max_purchase":   l.MaxPurchase,
 				"start_date":     l.StartDate,

@@ -54,14 +54,23 @@ func LoadBatches(db *sql.DB, eventID string, lotIDs []string) (map[string]BatchI
 	}
 
 	rows, err := db.Query(fmt.Sprintf(`
-		SELECT id, price, fee_payer, type, status,
-		       quantity_total, quantity_sold, min_purchase, max_purchase
-		FROM ticket_batches
-		WHERE event_id = $1
-		  AND id IN (%s)
-		  AND status = 'active'
-		  AND (start_date IS NULL OR start_date <= NOW())
-		  AND (end_date IS NULL OR end_date > NOW())`,
+		SELECT tb.id, tb.price, tb.fee_payer, tb.type, tb.status,
+		       tb.quantity_total, tb.quantity_sold, tb.min_purchase, tb.max_purchase
+		FROM ticket_batches tb
+		WHERE tb.event_id = $1
+		  AND tb.id IN (%s)
+		  AND tb.status = 'active'
+		  AND (tb.start_date IS NULL OR tb.start_date <= NOW())
+		  AND (tb.end_date IS NULL OR tb.end_date > NOW())
+		  AND (
+			tb.sales_trigger <> 'previous_batch_sold_out'
+			OR tb.previous_batch_id IS NULL
+			OR EXISTS (
+				SELECT 1 FROM ticket_batches prev
+				WHERE prev.id = tb.previous_batch_id
+				  AND prev.quantity_sold >= prev.quantity_total
+			)
+		  )`,
 		strings.Join(placeholders, ",")), args...)
 	if err != nil {
 		return nil, err

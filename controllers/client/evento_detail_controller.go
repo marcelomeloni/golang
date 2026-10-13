@@ -82,6 +82,10 @@ type OfficialLot struct {
 	FeePercentage     float64 `json:"feePercentage"`
 	Available         bool    `json:"available"`
 	UnavailableReason string  `json:"unavailableReason,omitempty"`
+	QuantityTotal     int     `json:"quantityTotal"`
+	QuantitySold      int     `json:"quantitySold"`
+	MinPurchase       int     `json:"minPurchase"`
+	MaxPurchase       int     `json:"maxPurchase"`
 }
 
 type MarketLot struct {
@@ -265,16 +269,35 @@ func GetEventDetail(c *gin.Context) {
 			COALESCE(tb.description, ''),
 			tb.price,
 			COALESCE(tb.fee_payer, 'buyer'),
+			COALESCE(tb.quantity_total, 0),
+			COALESCE(tb.quantity_sold, 0),
+			COALESCE(tb.min_purchase, 1),
+			COALESCE(tb.max_purchase, 10),
 			(
 				tb.status = 'active'
 				AND (tb.start_date IS NULL OR tb.start_date <= NOW())
 				AND (tb.end_date   IS NULL OR tb.end_date   >  NOW())
 				AND tb.quantity_sold < tb.quantity_total
+				AND (
+					tb.sales_trigger <> 'previous_batch_sold_out'
+					OR tb.previous_batch_id IS NULL
+					OR EXISTS (
+						SELECT 1 FROM ticket_batches prev
+						WHERE prev.id = tb.previous_batch_id
+						  AND prev.quantity_sold >= prev.quantity_total
+					)
+				)
 			) AS available,
 			CASE
 				WHEN tb.quantity_sold >= tb.quantity_total                  THEN 'sold_out'
 				WHEN tb.end_date   IS NOT NULL AND tb.end_date   <= NOW()   THEN 'expired'
 				WHEN tb.start_date IS NOT NULL AND tb.start_date >  NOW()   THEN 'not_started'
+				WHEN tb.sales_trigger = 'previous_batch_sold_out'
+				     AND NOT EXISTS (
+						SELECT 1 FROM ticket_batches prev
+						WHERE prev.id = tb.previous_batch_id
+						  AND prev.quantity_sold >= prev.quantity_total
+					)                                                     THEN 'waiting_previous'
 				ELSE ''
 			END AS unavailable_reason,
 			COALESCE(tc.id::text, ''),
@@ -303,6 +326,7 @@ func GetEventDetail(c *gin.Context) {
 
 			if err := rowsOfficial.Scan(
 				&l.ID, &l.Title, &l.Subtitle, &l.Price, &l.FeePayer,
+				&l.QuantityTotal, &l.QuantitySold, &l.MinPurchase, &l.MaxPurchase,
 				&l.Available, &l.UnavailableReason,
 				&catID, &catName, &catType, &catDesc, &catPosition,
 			); err != nil {

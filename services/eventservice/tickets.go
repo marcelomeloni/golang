@@ -22,6 +22,7 @@ type TicketCategoryInput struct {
 }
 
 type TicketLotInput struct {
+	ID           string  `json:"id"`
 	Name         string  `json:"name"`
 	Price        float64 `json:"price"`
 	Quantity     int     `json:"quantity"`
@@ -77,17 +78,22 @@ func insertCategory(
 }
 
 func insertLots(ctx context.Context, tx *sql.Tx, eventID, categoryID, lotType string, lots []TicketLotInput) error {
-	// nome → batchID para resolver referências de lote-gatilho dentro da mesma categoria
+	// id do lote (cliente) → batchID para resolver referências de lote-gatilho
+	lotIDToBatchID := make(map[string]string, len(lots))
+	// nome → batchID (fallback para payloads antigos sem id)
 	lotNameToBatchID := make(map[string]string, len(lots))
 
 	for i, lot := range lots {
 		batchID := uuid.New().String()
-		prevBatchID := resolvePreviousBatch(lot, lots[:i], lotNameToBatchID)
+		prevBatchID := resolvePreviousBatch(lot, lots[:i], lotIDToBatchID, lotNameToBatchID)
 
 		if err := insertBatch(ctx, tx, batchID, eventID, categoryID, lotType, prevBatchID, lot); err != nil {
 			return fmt.Errorf("lote '%s': %w", lot.Name, err)
 		}
 
+		if lot.ID != "" {
+			lotIDToBatchID[lot.ID] = batchID
+		}
 		lotNameToBatchID[lot.Name] = batchID
 	}
 	return nil
@@ -126,22 +132,43 @@ func insertBatch(
 	return err
 }
 
-// resolvePreviousBatch retorna o batchID do lote-gatilho quando salesTrigger = "batch".
-func resolvePreviousBatch(lot TicketLotInput, prevLots []TicketLotInput, idMap map[string]string) *string {
-	if lot.SalesTrigger != "batch" {
+// resolvePreviousBatch retorna o batchID do lote-gatilho quando o lote usa
+// virada automática (salesTrigger = "batch"). A resolução é feita pelo id do
+// lote enviado pelo frontend (estável dentro do mesmo payload) e cai no nome
+// como fallback para payloads legados.
+func resolvePreviousBatch(lot TicketLotInput, prevLots []TicketLotInput, idMap, nameMap map[string]string) *string {
+	if !isBatchTrigger(lot.SalesTrigger) {
 		return nil
 	}
 	// Tenta resolver pelo ID explícito enviado pelo frontend
-	if id, ok := idMap[lot.TriggerLotID]; ok {
-		return &id
+	if lot.TriggerLotID != "" {
+		if id, ok := idMap[lot.TriggerLotID]; ok {
+			return &id
+		}
+		if id, ok := nameMap[lot.TriggerLotID]; ok {
+			return &id
+		}
 	}
 	// Fallback: lote imediatamente anterior na mesma categoria
 	if len(prevLots) > 0 {
-		if id, ok := idMap[prevLots[len(prevLots)-1].Name]; ok {
+		prev := prevLots[len(prevLots)-1]
+		if prev.ID != "" {
+			if id, ok := idMap[prev.ID]; ok {
+				return &id
+			}
+		}
+		if id, ok := nameMap[prev.Name]; ok {
 			return &id
 		}
 	}
 	return nil
+}
+
+// isBatchTrigger aceita tanto o valor do formulário ("batch") quanto o valor
+// já persistido no banco ("previous_batch_sold_out"), evitando que o gatilho
+// seja rebaixado para "date" em um round-trip de edição.
+func isBatchTrigger(v string) bool {
+	return v == "batch" || v == "previous_batch_sold_out"
 }
 
 // ─── Helpers privados ────────────────────────────────────────────────────────

@@ -19,7 +19,7 @@ func MapAvailability(v string) string {
 // MapSalesTrigger converte "batch" para "previous_batch_sold_out" quando há
 // um lote anterior resolvido; caso contrário retorna "date".
 func MapSalesTrigger(v string, prevBatchID *string) string {
-	if v == "batch" && prevBatchID != nil {
+	if isBatchTrigger(v) && prevBatchID != nil {
 		return "previous_batch_sold_out"
 	}
 	return "date"
