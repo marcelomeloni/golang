@@ -9,6 +9,7 @@ import (
 	"os"
 
 	"bilheteria-api/config"
+	"bilheteria-api/services/emailsender"
 	"bilheteria-api/services/orderservice"
 	"bilheteria-api/services/paymentservice"
 	"github.com/gin-gonic/gin"
@@ -148,6 +149,12 @@ func handleBillingPaid(c *gin.Context, db *sql.DB, raw json.RawMessage) {
 	log.Printf("handleBillingPaid: orderID=%s confirmado ✓", orderID)
 
 	processMarketTransactionIfExists(db, orderID)
+
+	go func() {
+		if err := orderservice.SendConfirmationEmail(db, emailsender.New(""), orderID); err != nil {
+			log.Printf("handleBillingPaid SendConfirmationEmail orderID=%s: %v", orderID, err)
+		}
+	}()
 
 	c.Status(http.StatusOK)
 }
