@@ -16,7 +16,5 @@ type Gateway interface {
 	Refund(externalID, reason string) error
 }
 
-// Default é o gateway ativo. Inicialize em main.go com:
-//
-//	paymentservice.Default = paymentservice.NewAbacatePay(os.Getenv("ABACATEPAY_API_KEY"))
+// Default é o gateway ativo. Inicialize em main.go com C6 Bank.
 var Default Gateway
