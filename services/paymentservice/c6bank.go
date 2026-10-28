@@ -193,16 +193,13 @@ func (g *c6Gateway) GeneratePix(orderID string, amountBRL float64, buyerName, bu
 		return Result{}, err
 	}
 
-	// Use txid based on orderID (truncated/padded to C6 constraints if needed)
-	txid := orderID
+	// Use txid based on orderID (alphanumeric, 26-35 chars)
+	txid := strings.ReplaceAll(orderID, "-", "")
 	if len(txid) > 35 {
 		txid = txid[:35]
 	}
-	if len(txid) < 26 {
-		// pad with zeros
-		for len(txid) < 26 {
-			txid = txid + "0"
-		}
+	for len(txid) < 26 {
+		txid += "0"
 	}
 
 	amount := fmt.Sprintf("%.2f", amountBRL)
