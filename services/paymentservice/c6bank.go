@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/skip2/go-qrcode"
 )
 
 const (
@@ -269,7 +271,6 @@ func (g *c6Gateway) GeneratePix(orderID string, amountBRL float64, buyerName, bu
 
 	pixQr := ""
 	if cob.QrCode.Imagem != "" {
-		// imagem may be base64 or data URI
 		img := cob.QrCode.Imagem
 		if strings.Contains(img, ",") {
 			parts := strings.SplitN(img, ",", 2)
@@ -281,8 +282,9 @@ func (g *c6Gateway) GeneratePix(orderID string, amountBRL float64, buyerName, bu
 		}
 	}
 	if pixQr == "" && pixCode != "" {
-		// try to generate? but we don't need to, C6 might provide; just leave empty if not present
-		_ = base64.StdEncoding
+		if png, err := qrcode.Encode(pixCode, qrcode.Medium, 256); err == nil {
+			pixQr = base64.StdEncoding.EncodeToString(png)
+		}
 	}
 
 	return Result{
