@@ -35,11 +35,19 @@ func main() {
 	middleware.InitJWKS()
 
 	// ── Gateways de pagamento ─────────────────────────────────────────────────
-	apiKey := os.Getenv("ABACATEPAY_API_KEY")
-	if apiKey == "" {
-		log.Fatal("❌ ABACATEPAY_API_KEY não definida")
+	// Migrado para C6 Bank
+	c6ClientID := os.Getenv("C6_CLIENT_ID")
+	c6ClientSecret := os.Getenv("C6_CLIENT_SECRET")
+	c6PixKey := os.Getenv("C6_PIX_KEY")
+	c6Env := os.Getenv("C6_ENV")
+	if c6ClientID == "" || c6ClientSecret == "" || c6PixKey == "" {
+		log.Fatal("❌ C6_CLIENT_ID, C6_CLIENT_SECRET ou C6_PIX_KEY não definidas")
 	}
-	paymentservice.Default = paymentservice.NewAbacatePay(apiKey)
+	gw, err := paymentservice.NewC6Bank(c6ClientID, c6ClientSecret, c6PixKey, c6Env)
+	if err != nil {
+		log.Fatal(err)
+	}
+	paymentservice.Default = gw
 
 	r := gin.Default()
 
@@ -66,6 +74,7 @@ func main() {
 	organizerRoutes.Register(r)
 	clientRoutes.Register(r)
 	webhookRoutes.Register(r)
+	webhookRoutes.RegisterC6(r)
 	adminRoutes.Register(r)
 
 	port := os.Getenv("PORT")
