@@ -26,6 +26,12 @@ type c6WebhookPayload struct {
 	Pix []c6WebhookPix `json:"pix"`
 }
 
+// C6BankWebhookHealthCheck responde ao GET que o C6 Bank faz para validar
+// a URL antes de começar a entregar notificações Pix.
+func C6BankWebhookHealthCheck(c *gin.Context) {
+	c.Status(http.StatusOK)
+}
+
 func C6BankWebhook(c *gin.Context) {
 	body, err := io.ReadAll(c.Request.Body)
 	if err != nil {
