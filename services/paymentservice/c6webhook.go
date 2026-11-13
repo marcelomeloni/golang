@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"strings"
@@ -18,8 +19,11 @@ type c6WebhookRaw struct {
 	AllOf      []c6WebhookRaw `json:"allOf"`
 }
 
+// info resolve o webhook independente de o C6 retornar o objeto direto
+// ou aninhado dentro de um array "allOf" (formato OpenAPI inline).
 func (r c6WebhookRaw) info() WebhookInfo {
-	if r.WebhookURL == "" && r.Chave == "" && len(r.AllOf) > 0 {
+	// Percorre allOf até encontrar um objeto com dados reais
+	for r.WebhookURL == "" && r.Chave == "" && len(r.AllOf) > 0 {
 		r = r.AllOf[0]
 	}
 	return WebhookInfo{
@@ -121,11 +125,12 @@ func (g *c6Gateway) ListWebhooks(params WebhookListParams) (WebhookList, error) 
 	if params.Fim != nil {
 		query.Set("fim", params.Fim.UTC().Format(time.RFC3339))
 	}
-	if params.PaginaAtual > 0 {
-		query.Set("paginacao.paginaAtual", fmt.Sprintf("%d", params.PaginaAtual))
-	}
+	// Sempre envia paginação — C6 pode retornar vazio sem esses parâmetros
+	query.Set("paginacao.paginaAtual", fmt.Sprintf("%d", params.PaginaAtual))
 	if params.ItensPorPagina > 0 {
 		query.Set("paginacao.itensPorPagina", fmt.Sprintf("%d", params.ItensPorPagina))
+	} else {
+		query.Set("paginacao.itensPorPagina", "100")
 	}
 
 	path := "/webhook"
@@ -138,10 +143,15 @@ func (g *c6Gateway) ListWebhooks(params WebhookListParams) (WebhookList, error) 
 		return WebhookList{}, err
 	}
 
+	log.Printf("C6 ListWebhooks RAW: %s", string(body))
+
 	var raw c6WebhookListRaw
 	if err := json.Unmarshal(body, &raw); err != nil {
 		return WebhookList{}, fmt.Errorf("c6bank parse webhooks: %w", err)
 	}
+
+	log.Printf("C6 ListWebhooks parsed: %d webhooks, totalItens=%d",
+		len(raw.Webhooks), raw.Parametros.Paginacao.QuantidadeTotalDeItens)
 
 	result := WebhookList{
 		Webhooks: make([]WebhookInfo, 0, len(raw.Webhooks)),
