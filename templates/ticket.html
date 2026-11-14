@@ -56,16 +56,22 @@
       inset: 0;
       background: linear-gradient(to bottom, transparent 20%, #0A0A0A 100%);
     }
-    .ticket__brand {
-      position: absolute;
-      top: 20px;
-      left: 24px;
-    }
-    .ticket__brand img {
-      height: 28px;
-      width: auto;
-      display: block;
-    }
+   .ticket__brand {
+  position: absolute;
+  top: 20px;
+  left: 24px;
+  background: #000;       
+  padding: 8px 14px;         
+  border-radius: 10px;    
+  display: inline-flex;    
+  align-items: center;
+  z-index: 2;               
+}
+.ticket__brand img {
+  height: 28px;
+  width: auto;
+  display: block;
+}
 
     /* ── Body ── */
     .ticket__body {
