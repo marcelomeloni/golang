@@ -23,13 +23,14 @@ func StrPtr(ns sql.NullString) *string {
 	return &s
 }
 
-// NullableJSON retorna nil para slices vazios,
-// compatível com COALESCE em colunas jsonb nullable.
+// NullableJSON retorna nil para slices vazios ou para o literal JSON null,
+// permitindo usar o valor como SQL NULL em colunas jsonb nullable.
 func NullableJSON(b []byte) interface{} {
-	if len(b) == 0 {
+	value := strings.TrimSpace(string(b))
+	if value == "" || value == "null" {
 		return nil
 	}
-	return b
+	return value
 }
 
 // StrVal desreferencia um *string com fallback para string vazia.
