@@ -1,5 +1,11 @@
 package organizer
-import "bilheteria-api/services/eventservice"
+
+import (
+	"strings"
+
+	"bilheteria-api/services/eventservice"
+)
+
 // ─── Tipos de request dos handlers de evento ─────────────────────────────────
 
 type SaveDraftRequest struct {
@@ -22,8 +28,8 @@ type UpdateEventRequest struct {
 	Location     *EventLocationInput                `json:"location"`
 	StartDate    *string                            `json:"start_date"`
 	EndDate      *string                            `json:"end_date"`
-	Categories   []eventservice.TicketCategoryInput `json:"ticket_categories"`
-	Requirements *EventRequirementsInput            `json:"requirements"`
+	Categories   *[]eventservice.TicketCategoryInput `json:"ticket_categories"`
+	Requirements *EventRequirementsInput             `json:"requirements"`
 }
 
 type EventLocationInput struct {
@@ -35,6 +41,20 @@ type EventLocationInput struct {
 	Neighborhood string `json:"neighborhood"`
 	City         string `json:"city"`
 	State        string `json:"state"`
+}
+
+func (l *EventLocationInput) IsEmpty() bool {
+	if l == nil {
+		return true
+	}
+	return strings.TrimSpace(l.VenueName) == "" &&
+		strings.TrimSpace(l.CEP) == "" &&
+		strings.TrimSpace(l.Street) == "" &&
+		strings.TrimSpace(l.Number) == "" &&
+		strings.TrimSpace(l.Complement) == "" &&
+		strings.TrimSpace(l.Neighborhood) == "" &&
+		strings.TrimSpace(l.City) == "" &&
+		strings.TrimSpace(l.State) == ""
 }
 
 type EventRequirementsInput struct {

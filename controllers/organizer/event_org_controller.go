@@ -1,7 +1,6 @@
 package organizer
 
 import (
-
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -59,12 +58,15 @@ func SaveDraftHandler(c *gin.Context) {
 		return
 	}
 
-	locationJSON, _ := json.Marshal(body.Location)
-	requirementsJSON, _ := json.Marshal(body.Requirements)
+	var locationJSON []byte
+	if body.Location != nil && !body.Location.IsEmpty() {
+		locationJSON = marshalJSON(body.Location)
+	}
+	requirementsJSON := marshalJSON(body.Requirements)
 
 	// Geocodifica a cidade em background — falha silenciosa se não encontrar
 	var coords *geocoding.Coordinates
-	if body.Location != nil {
+	if body.Location != nil && !body.Location.IsEmpty() {
 		coords, _ = geocoding.FromCityState(ctx, body.Location.City, body.Location.State)
 	}
 
@@ -130,7 +132,8 @@ func UpdateEventHandler(c *gin.Context) {
 	db := config.GetDB()
 	ctx := c.Request.Context()
 
-	if _, err := orgservice.ResolveOrgWithPermission(ctx, db, orgSlug, uid); err != nil {
+	orgID, err := orgservice.ResolveOrgWithPermission(ctx, db, orgSlug, uid)
+	if err != nil {
 		c.JSON(http.StatusForbidden, gin.H{"error": "acesso negado"})
 		return
 	}
@@ -141,19 +144,58 @@ func UpdateEventHandler(c *gin.Context) {
 		return
 	}
 
-	startDate, endDate, err := parseDatePairPtr(body.StartDate, body.EndDate)
+	startDate, err := parseOptionalTimePtr(body.StartDate)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	endDate, err := parseOptionalTimePtr(body.EndDate)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
-	locationJSON, _ := json.Marshal(body.Location)
-	requirementsJSON, _ := json.Marshal(body.Requirements)
+	var eventStatus string
+	err = db.QueryRowContext(ctx,
+		`SELECT status FROM events WHERE id = $1 AND organization_id = $2`,
+		eventID, orgID,
+	).Scan(&eventStatus)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "evento não encontrado"})
+		return
+	}
 
-	// Regeocodifica só se a localização foi enviada nesta requisição
+	categoriesProvided := body.Categories != nil
+	var categories []eventservice.TicketCategoryInput
+	if categoriesProvided {
+		categories = *body.Categories
+		if eventStatus != "draft" {
+			hasDependencies, err := eventHasTicketDependencies(ctx, db, eventID)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao verificar ingressos existentes"})
+				return
+			}
+			if hasDependencies {
+				c.JSON(http.StatusUnprocessableEntity, gin.H{
+					"error": "não é possível alterar categorias ou lotes de um evento publicado que já possui vendas ou distribuições",
+				})
+				return
+			}
+		}
+	}
+
+	locationProvided := body.Location != nil
+	var locationJSON []byte
 	var coords *geocoding.Coordinates
-	if body.Location != nil {
+	if locationProvided && !body.Location.IsEmpty() {
+		locationJSON = marshalJSON(body.Location)
 		coords, _ = geocoding.FromCityState(ctx, body.Location.City, body.Location.State)
+	}
+
+	requirementsProvided := body.Requirements != nil
+	var requirementsJSON []byte
+	if requirementsProvided {
+		requirementsJSON = marshalJSON(body.Requirements)
 	}
 
 	tx, err := db.BeginTx(ctx, nil)
@@ -169,39 +211,46 @@ func UpdateEventHandler(c *gin.Context) {
                 description  = COALESCE($2, description),
                 category     = COALESCE($3, category),
                 instagram    = COALESCE($4, instagram),
-                start_date   = COALESCE($5, start_date),
-                end_date     = COALESCE($6, end_date),
-                location     = COALESCE($7, location),
-                requirements = COALESCE($8, requirements),
+                start_date   = CASE WHEN $5::boolean THEN $6::timestamptz ELSE start_date END,
+                end_date     = CASE WHEN $7::boolean THEN $8::timestamptz ELSE end_date END,
+                location     = CASE WHEN $9::boolean THEN $10::jsonb ELSE location END,
+                requirements = CASE WHEN $11::boolean THEN $12::jsonb ELSE requirements END,
                 geolocation  = CASE
-                                 WHEN $9::float8 IS NOT NULL
-                                 THEN ST_SetSRID(ST_MakePoint($10::float8, $9::float8), 4326)
+                                 WHEN $9::boolean THEN
+                                   CASE
+                                     WHEN $13::float8 IS NOT NULL
+                                     THEN ST_SetSRID(ST_MakePoint($14::float8, $13::float8), 4326)
+                                     ELSE NULL
+                                   END
                                  ELSE geolocation
                                END,
                 updated_at   = now()
-          WHERE id = $11`,
+          WHERE id = $15 AND organization_id = $16`,
 		body.Title, body.Description, body.Category, body.Instagram,
-		startDate, endDate,
-		dbutil.NullableJSON(locationJSON),
-		dbutil.NullableJSON(requirementsJSON),
+		body.StartDate != nil, startDate,
+		body.EndDate != nil, endDate,
+		locationProvided, dbutil.NullableJSON(locationJSON),
+		requirementsProvided, dbutil.NullableJSON(requirementsJSON),
 		coordLat(coords), coordLng(coords),
-		eventID,
+		eventID, orgID,
 	)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao atualizar evento: " + err.Error()})
 		return
 	}
 
-	if len(body.Categories) > 0 {
+	if categoriesProvided {
 		if _, err := tx.ExecContext(ctx,
 			`DELETE FROM ticket_categories WHERE event_id = $1`, eventID,
 		); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao remover categorias antigas"})
 			return
 		}
-		if err := eventservice.InsertTicketCategories(ctx, tx, eventID, body.Categories); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao recriar categorias: " + err.Error()})
-			return
+		if len(categories) > 0 {
+			if err := eventservice.InsertTicketCategories(ctx, tx, eventID, categories); err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao recriar categorias: " + err.Error()})
+				return
+			}
 		}
 	}
 
@@ -223,12 +272,13 @@ func PublishEventHandler(c *gin.Context) {
 	db := config.GetDB()
 	ctx := c.Request.Context()
 
-	if _, err := orgservice.ResolveOrgWithPermission(ctx, db, orgSlug, uid); err != nil {
+	orgID, err := orgservice.ResolveOrgWithPermission(ctx, db, orgSlug, uid)
+	if err != nil {
 		c.JSON(http.StatusForbidden, gin.H{"error": "acesso negado"})
 		return
 	}
 
-	snap, err := fetchEventSnapshot(ctx, db, eventID)
+	snap, err := fetchEventSnapshot(ctx, db, eventID, orgID)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "evento não encontrado"})
 		return
@@ -251,10 +301,17 @@ func PublishEventHandler(c *gin.Context) {
 		return
 	}
 
-	if _, err := db.ExecContext(ctx,
-		`UPDATE events SET status = 'published', updated_at = now() WHERE id = $1`, eventID,
-	); err != nil {
+	result, err := db.ExecContext(ctx,
+		`UPDATE events SET status = 'published', updated_at = now()
+          WHERE id = $1 AND organization_id = $2`,
+		eventID, orgID,
+	)
+	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao publicar evento"})
+		return
+	}
+	if rows, err := result.RowsAffected(); err != nil || rows == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "evento não encontrado"})
 		return
 	}
 
@@ -394,40 +451,64 @@ func UploadEventBannerHandler(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"url": result.URL})
 }
 
+// DeleteEventBannerHandler — DELETE /org/:slug/events/:id/banner
+func DeleteEventBannerHandler(c *gin.Context) {
+	orgSlug := c.Param("slug")
+	eventID := c.Param("id")
+	userID, _ := c.Get("userID")
+	uid := userID.(string)
+
+	db := config.GetDB()
+	ctx := c.Request.Context()
+
+	orgID, err := orgservice.ResolveOrgWithPermission(ctx, db, orgSlug, uid)
+	if err != nil {
+		c.JSON(http.StatusForbidden, gin.H{"error": "acesso negado"})
+		return
+	}
+
+	result, err := db.ExecContext(ctx,
+		`UPDATE events SET image_url = NULL, updated_at = now() WHERE id = $1 AND organization_id = $2`,
+		eventID, orgID,
+	)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao remover banner"})
+		return
+	}
+
+	rows, err := result.RowsAffected()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao remover banner"})
+		return
+	}
+	if rows == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "evento não encontrado"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "banner removido"})
+}
+
 // ─── Helpers privados ─────────────────────────────────────────────────────────
 
 type eventSnapshot struct {
 	Status       string
 	Title        *string
-	Category     *string
-	ImageURL     *string
 	StartDate    *time.Time
 	EndDate      *time.Time
-	LocationCity *string
 	Requirements []byte
-	BatchCount   int
 }
 
-func fetchEventSnapshot(ctx context.Context, db *sql.DB, eventID string) (*eventSnapshot, error) {
+func fetchEventSnapshot(ctx context.Context, db *sql.DB, eventID, orgID string) (*eventSnapshot, error) {
 	var snap eventSnapshot
 	err := db.QueryRowContext(ctx,
-		`SELECT
-           e.status, e.title, e.category, e.image_url,
-           e.start_date, e.end_date,
-           e.location->>'city' AS location_city,
-           e.requirements,
-           COUNT(tb.id) AS batch_count
-          FROM events e
-          LEFT JOIN ticket_categories tc ON tc.event_id = e.id
-          LEFT JOIN ticket_batches tb    ON tb.category_id = tc.id AND tb.status = 'active'
-         WHERE e.id = $1
-         GROUP BY e.status, e.title, e.category, e.image_url,
-                  e.start_date, e.end_date, e.location, e.requirements`,
-		eventID,
+		`SELECT e.status, e.title, e.start_date, e.end_date, e.requirements
+           FROM events e
+          WHERE e.id = $1 AND e.organization_id = $2`,
+		eventID, orgID,
 	).Scan(
-		&snap.Status, &snap.Title, &snap.Category,
-		&snap.ImageURL, &snap.StartDate, &snap.EndDate,
-		&snap.LocationCity, &snap.Requirements, &snap.BatchCount,
+		&snap.Status, &snap.Title,
+		&snap.StartDate, &snap.EndDate, &snap.Requirements,
 	)
 	return &snap, err
 }
@@ -438,26 +519,16 @@ func validateForPublish(snap *eventSnapshot) []string {
 	if snap.Title == nil || strings.TrimSpace(*snap.Title) == "" {
 		errs = append(errs, "título obrigatório")
 	}
-	if snap.Category == nil || *snap.Category == "" {
-		errs = append(errs, "categoria do evento obrigatória")
-	}
-	if snap.ImageURL == nil {
-		errs = append(errs, "banner do evento obrigatório")
-	}
+
 	if snap.StartDate == nil {
 		errs = append(errs, "data de início obrigatória")
-	}
-	if snap.EndDate == nil {
-		errs = append(errs, "data de término obrigatória")
-	}
-	if snap.StartDate != nil && snap.EndDate != nil && !snap.EndDate.After(*snap.StartDate) {
-		errs = append(errs, "data de término deve ser posterior ao início")
-	}
-	if snap.LocationCity == nil || *snap.LocationCity == "" {
-		errs = append(errs, "localização (cidade) obrigatória")
-	}
-	if snap.BatchCount == 0 {
-		errs = append(errs, "pelo menos um lote de ingressos ativo é obrigatório")
+	} else {
+		if snap.StartDate.Before(time.Now().Add(-5 * time.Minute)) {
+			errs = append(errs, "data de início não pode estar no passado")
+		}
+		if snap.EndDate != nil && !snap.EndDate.After(*snap.StartDate) {
+			errs = append(errs, "data de término deve ser posterior ao início")
+		}
 	}
 
 	var req EventRequirementsInput
@@ -472,6 +543,32 @@ func validateForPublish(snap *eventSnapshot) []string {
 	return errs
 }
 
+func eventHasTicketDependencies(ctx context.Context, db *sql.DB, eventID string) (bool, error) {
+	var count int64
+	err := db.QueryRowContext(ctx,
+		`SELECT
+		   (SELECT COUNT(*)
+		      FROM tickets t
+		      JOIN ticket_batches tb ON tb.id = t.batch_id
+		     WHERE tb.event_id = $1)
+		 + (SELECT COUNT(*) FROM promoter_distributions WHERE event_id = $1)
+		 + (SELECT COUNT(*)
+		      FROM coupon_batches cb
+		      JOIN coupons c ON c.id = cb.coupon_id
+		     WHERE c.event_id = $1)`,
+		eventID,
+	).Scan(&count)
+	return count > 0, err
+}
+
+func marshalJSON(value interface{}) []byte {
+	b, err := json.Marshal(value)
+	if err != nil || string(b) == "null" {
+		return nil
+	}
+	return b
+}
+
 func parseDatePair(start, end string) (*time.Time, *time.Time, error) {
 	s, err := parseOptionalTime(start)
 	if err != nil {
@@ -484,18 +581,15 @@ func parseDatePair(start, end string) (*time.Time, *time.Time, error) {
 	return s, e, nil
 }
 
-func parseDatePairPtr(start, end *string) (*time.Time, *time.Time, error) {
-	var s, e string
-	if start != nil {
-		s = *start
+func parseOptionalTimePtr(value *string) (*time.Time, error) {
+	if value == nil {
+		return nil, nil
 	}
-	if end != nil {
-		e = *end
-	}
-	return parseDatePair(s, e)
+	return parseOptionalTime(*value)
 }
 
 func parseOptionalTime(s string) (*time.Time, error) {
+	s = strings.TrimSpace(s)
 	if s == "" {
 		return nil, nil
 	}

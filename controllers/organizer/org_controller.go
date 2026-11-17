@@ -2,9 +2,11 @@ package organizer
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 
 	"bilheteria-api/config"
+	"bilheteria-api/services/eventservice"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 )
@@ -57,15 +59,52 @@ func OnboardingHandler(c *gin.Context) {
 	}
 
 	orgID := uuid.New().String()
-	_, err = tx.ExecContext(ctx,
-		`INSERT INTO organizations (id, name, slug, description, email, phone, instagram)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-		orgID, body.OrgName, body.OrgSlug, body.OrgDescription,
-		body.OrgEmail, body.OrgPhone, body.OrgInstagram,
-	)
-	if err != nil {
-		c.JSON(http.StatusConflict, gin.H{"error": "slug já em uso ou dados inválidos: " + err.Error()})
-		return
+	baseSlug := eventservice.Slugify(body.OrgSlug)
+	if baseSlug == "" {
+		baseSlug = "org"
+	}
+
+	orgSlug := baseSlug
+	inserted := false
+	for attempt := 0; attempt <= 50; attempt++ {
+		if attempt > 0 {
+			orgSlug = fmt.Sprintf("%s-%d", baseSlug, attempt)
+		}
+
+		res, execErr := tx.ExecContext(ctx,
+			`INSERT INTO organizations (id, name, slug, description, email, phone, instagram)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7)
+			 ON CONFLICT (slug) DO NOTHING`,
+			orgID, body.OrgName, orgSlug, body.OrgDescription,
+			body.OrgEmail, body.OrgPhone, body.OrgInstagram,
+		)
+		if execErr != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao criar organização: " + execErr.Error()})
+			return
+		}
+
+		rows, rowsErr := res.RowsAffected()
+		if rowsErr != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao criar organização"})
+			return
+		}
+		if rows == 1 {
+			inserted = true
+			break
+		}
+	}
+
+	if !inserted {
+		orgSlug = fmt.Sprintf("%s-%s", baseSlug, uuid.New().String()[:8])
+		if _, execErr := tx.ExecContext(ctx,
+			`INSERT INTO organizations (id, name, slug, description, email, phone, instagram)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+			orgID, body.OrgName, orgSlug, body.OrgDescription,
+			body.OrgEmail, body.OrgPhone, body.OrgInstagram,
+		); execErr != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao criar organização: " + execErr.Error()})
+			return
+		}
 	}
 
 	_, err = tx.ExecContext(ctx,
@@ -86,6 +125,7 @@ func OnboardingHandler(c *gin.Context) {
 	c.JSON(http.StatusCreated, gin.H{
 		"redirect": "/dashboard",
 		"org_id":   orgID,
+		"slug":     orgSlug,
 		"message":  "organização criada com sucesso",
 	})
 }

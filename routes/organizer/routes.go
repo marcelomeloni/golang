@@ -52,6 +52,7 @@ func Register(r *gin.Engine) {
 		auth.PATCH("/org/:slug/events/:id/publish", controllers.PublishEventHandler)
 		auth.PATCH("/org/:slug/events/:id/cancel",  controllers.CancelEventHandler)
 		auth.POST("/org/:slug/events/:id/banner",   controllers.UploadEventBannerHandler)
+		auth.DELETE("/org/:slug/events/:id/banner", controllers.DeleteEventBannerHandler)
 
 		// ── Manage (overview + sub-páginas) ───────────────────────────────────
 		auth.GET("/org/:slug/events/:id/manage", controllers.GetEventManageHandler)
