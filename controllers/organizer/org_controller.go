@@ -35,6 +35,12 @@ func OnboardingHandler(c *gin.Context) {
 		return
 	}
 
+	cpf := sanitizeCPF(body.CPF)
+	if !isValidCPF(cpf) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "CPF inválido"})
+		return
+	}
+
 	db := config.GetDB()
 	ctx := context.Background()
 
@@ -51,7 +57,7 @@ func OnboardingHandler(c *gin.Context) {
 		        cpf        = $2,
 		        updated_at = now()
 		  WHERE id = $3`,
-		body.FullName, body.CPF, uid,
+		body.FullName, cpf, uid,
 	)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao atualizar usuário: " + err.Error()})
