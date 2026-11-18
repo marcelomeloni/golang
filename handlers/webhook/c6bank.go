@@ -5,7 +5,10 @@ import (
 	"encoding/json"
 	"io"
 	"log"
+	"math"
 	"net/http"
+	"strconv"
+	"strings"
 
 	"bilheteria-api/config"
 	"bilheteria-api/services/emailsender"
@@ -63,8 +66,17 @@ func C6BankWebhook(c *gin.Context) {
 			continue
 		}
 
+		paidAmount, err := strconv.ParseFloat(strings.TrimSpace(pix.Valor), 64)
+		if err != nil || paidAmount <= 0 {
+			log.Printf("C6BankWebhook: valor inválido para txid=%s: %q", pix.Txid, pix.Valor)
+			continue
+		}
+
 		var orderID string
-		err := db.QueryRow(`SELECT id FROM orders WHERE pix_external_id = $1`, pix.Txid).Scan(&orderID)
+		var totalAmount float64
+		err = db.QueryRow(`
+			SELECT id, total_amount FROM orders WHERE pix_external_id = $1
+		`, pix.Txid).Scan(&orderID, &totalAmount)
 		if err != nil {
 			if err == sql.ErrNoRows {
 				log.Printf("C6BankWebhook: pedido não encontrado para txid=%s", pix.Txid)
@@ -74,13 +86,24 @@ func C6BankWebhook(c *gin.Context) {
 			continue
 		}
 
-		log.Printf("C6BankWebhook: txid=%s -> orderID=%s recebido", pix.Txid, orderID)
+		if math.Abs(paidAmount-totalAmount) > 0.01 {
+			log.Printf("C6BankWebhook: valor divergente txid=%s orderID=%s recebido=%.2f esperado=%.2f — ignorando",
+				pix.Txid, orderID, paidAmount, totalAmount)
+			continue
+		}
+
+		e2eID := sql.NullString{}
+		if v := strings.TrimSpace(pix.EndToEndId); v != "" {
+			e2eID = sql.NullString{String: v, Valid: true}
+		}
+
+		log.Printf("C6BankWebhook: txid=%s e2eid=%s -> orderID=%s recebido", pix.Txid, pix.EndToEndId, orderID)
 
 		// Pagamento de evento cancelado/encerrado: não emite ingresso — marca o
 		// pedido como cancelado e devolve o dinheiro automaticamente.
 		if cancelledEvent(db, orderID) {
 			log.Printf("C6BankWebhook: orderID=%s pertence a evento não publicado — cancelando pedido e estornando", orderID)
-			if cancelPaidOrderAndRefund(db, orderID, pix.Txid, "Pagamento de evento cancelado") {
+			if cancelPaidOrderAndRefund(db, orderID, "Pagamento de evento cancelado") {
 				continue
 			}
 			// Estorno não executado: segue o fluxo normal
@@ -93,8 +116,13 @@ func C6BankWebhook(c *gin.Context) {
 		}
 
 		res, err := tx.Exec(`
-			UPDATE orders SET status = 'paid', updated_at = NOW()
-			WHERE id = $1 AND status != 'paid'`, orderID)
+			UPDATE orders
+			SET status = 'paid',
+			    pix_e2e_id = $2,
+			    pix_paid_amount = $3,
+			    pix_paid_at = NOW(),
+			    updated_at = NOW()
+			WHERE id = $1 AND status != 'paid'`, orderID, e2eID, paidAmount)
 		if err != nil {
 			log.Printf("C6BankWebhook: update order orderID=%s: %v", orderID, err)
 			tx.Rollback()

@@ -11,6 +11,9 @@ import (
 	// Import dos Controllers (onde está a lógica e o InitEmailSender)
 	clientControllers "bilheteria-api/controllers/client"
 
+	// Import dos Handlers
+	"bilheteria-api/handlers/health"
+
 	// Import das Rotas
 	adminRoutes "bilheteria-api/routes/admin"
 	clientRoutes "bilheteria-api/routes/client"
@@ -70,6 +73,8 @@ func main() {
 		c.Next()
 	})
 	// ─────────────────────────────────────────────────────────────────────────
+
+	r.GET("/health", health.Check)
 
 	organizerRoutes.Register(r)
 	clientRoutes.Register(r)

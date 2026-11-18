@@ -11,7 +11,7 @@ import (
 	"bilheteria-api/config"
 	"bilheteria-api/services/emailsender"
 	"bilheteria-api/services/orderservice"
-	"bilheteria-api/services/paymentservice"
+	"bilheteria-api/services/refundservice"
 	"github.com/gin-gonic/gin"
 )
 
@@ -106,7 +106,7 @@ func handleBillingPaid(c *gin.Context, db *sql.DB, raw json.RawMessage) {
 	// pedido como cancelado e devolve o dinheiro automaticamente.
 	if cancelledEvent(db, orderID) {
 		log.Printf("handleBillingPaid: orderID=%s pertence a evento não publicado — cancelando pedido e estornando", orderID)
-		if cancelPaidOrderAndRefund(db, orderID, data.PixQrCode.ID, "Pagamento de evento cancelado") {
+		if cancelPaidOrderAndRefund(db, orderID, "Pagamento de evento cancelado") {
 			c.Status(http.StatusOK)
 			return
 		}
@@ -183,20 +183,8 @@ func cancelledEvent(db *sql.DB, orderID string) bool {
 // executado (gateway indisponível, erro da API), devolve false e NÃO cancela: o
 // fluxo normal de billing.paid segue (order -> paid, ingressos emitidos) e o
 // comprador solicita o reembolso pela via padrão.
-func cancelPaidOrderAndRefund(db *sql.DB, orderID, pixExternalID, reason string) bool {
-	if pixExternalID == "" {
-		_ = db.QueryRow(`SELECT pix_external_id FROM orders WHERE id = $1`, orderID).Scan(&pixExternalID)
-	}
-	if pixExternalID == "" {
-		log.Printf("cancelPaidOrderAndRefund: orderID=%s sem pix_external_id — estorno manual necessário", orderID)
-		return false
-	}
-
-	if paymentservice.Default == nil {
-		log.Printf("cancelPaidOrderAndRefund: gateway não inicializado — estorno manual necessário, pedido será tratado como pago")
-		return false
-	}
-	if err := paymentservice.Default.Refund(pixExternalID, reason); err != nil {
+func cancelPaidOrderAndRefund(db *sql.DB, orderID, reason string) bool {
+	if err := refundservice.RefundOrder(db, orderID, reason); err != nil {
 		log.Printf("cancelPaidOrderAndRefund: refund orderID=%s: %v (mantendo pedido como pago e emitindo ingressos)", orderID, err)
 		return false
 	}
