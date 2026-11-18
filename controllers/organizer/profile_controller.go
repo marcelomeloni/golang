@@ -2,10 +2,14 @@ package organizer
 
 import (
 	"context"
+	"errors"
+	"log"
 	"net/http"
+	"strings"
 
 	"bilheteria-api/config"
 	"github.com/gin-gonic/gin"
+	"github.com/lib/pq"
 )
 
 func GetProfileHandler(c *gin.Context) {
@@ -91,7 +95,12 @@ func UpdateProfileHandler(c *gin.Context) {
 		cpfValue, phoneValue, uid,
 	)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao atualizar perfil: " + err.Error()})
+		log.Printf("UpdateProfileHandler: %v", err)
+		if isCPFConflict(err) {
+			respondCPFConflict(c)
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao atualizar perfil"})
 		return
 	}
 
@@ -140,4 +149,20 @@ func isValidCPF(cpf string) bool {
 	}
 
 	return cpf[9] == checkDigit(9) && cpf[10] == checkDigit(10)
+}
+
+func isCPFConflict(err error) bool {
+	var pqErr *pq.Error
+	if errors.As(err, &pqErr) {
+		return pqErr.Code == "23505" && strings.Contains(pqErr.Constraint, "cpf")
+	}
+	return strings.Contains(err.Error(), "duplicate key value violates unique constraint") &&
+		strings.Contains(err.Error(), "cpf")
+}
+
+func respondCPFConflict(c *gin.Context) {
+	c.JSON(http.StatusConflict, gin.H{
+		"error": "Já existe uma conta com este cpf",
+		"code":  "cpf_conflict",
+	})
 }

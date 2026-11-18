@@ -3,6 +3,7 @@ package organizer
 import (
 	"context"
 	"fmt"
+	"log"
 	"net/http"
 
 	"bilheteria-api/config"
@@ -60,7 +61,12 @@ func OnboardingHandler(c *gin.Context) {
 		body.FullName, cpf, uid,
 	)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao atualizar usuário: " + err.Error()})
+		log.Printf("OnboardingHandler update user: %v", err)
+		if isCPFConflict(err) {
+			respondCPFConflict(c)
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao atualizar usuário"})
 		return
 	}
 
