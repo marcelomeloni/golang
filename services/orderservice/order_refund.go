@@ -44,19 +44,30 @@ func MarkOrderRefunded(db *sql.DB, orderID string, markRefundsCompleted bool) er
 	// Mercado: fecha a transação pendente/hold e reabre o listing (o ingresso
 	// volta pro vendedor).
 	var listingID string
+	var withdrawRequestID sql.NullString
 	err = tx.QueryRow(`
-		SELECT listing_id FROM market_transactions
-		WHERE order_id = $1 AND escrow_status IN ('pending', 'held')
+		SELECT listing_id, withdraw_request_id FROM market_transactions
+		WHERE order_id = $1 AND escrow_status IN ('pending', 'held', 'withdraw_requested')
 		LIMIT 1
-	`, orderID).Scan(&listingID)
+	`, orderID).Scan(&listingID, &withdrawRequestID)
 	if err == nil {
 		if _, err := tx.Exec(`
 			UPDATE market_listings SET status = 'active', updated_at = NOW() WHERE id = $1
 		`, listingID); err != nil {
 			return fmt.Errorf("MarkOrderRefunded: reopen listing: %w", err)
 		}
+		if withdrawRequestID.Valid {
+			if _, err := tx.Exec(`
+				UPDATE market_withdraw_requests SET status = 'cancelled', updated_at = NOW()
+				WHERE id = $1 AND status = 'pending'
+			`, withdrawRequestID.String); err != nil {
+				return fmt.Errorf("MarkOrderRefunded: cancel withdraw request: %w", err)
+			}
+		}
 		if _, err := tx.Exec(`
-			UPDATE market_transactions SET escrow_status = 'cancelled' WHERE order_id = $1
+			UPDATE market_transactions
+			SET escrow_status = 'cancelled', withdraw_request_id = NULL
+			WHERE order_id = $1
 		`, orderID); err != nil {
 			return fmt.Errorf("MarkOrderRefunded: cancel transaction: %w", err)
 		}

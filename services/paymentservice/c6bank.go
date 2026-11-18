@@ -2,8 +2,10 @@ package paymentservice
 
 import (
 	"bytes"
+	"crypto/rand"
 	"crypto/tls"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -337,12 +339,90 @@ func (g *c6Gateway) CheckStatus(externalID string) (string, error) {
 	return status, nil
 }
 
+type c6PixConsultado struct {
+	EndToEndID string `json:"endToEndId"`
+	Txid       string `json:"txid"`
+	Valor      string `json:"valor"`
+	Horario    string `json:"horario"`
+	Devolucoes []struct {
+		ID     string `json:"id"`
+		Status string `json:"status"`
+	} `json:"devolucoes"`
+}
+
+type c6PixLista struct {
+	Pix []c6PixConsultado `json:"pix"`
+}
+
 func (g *c6Gateway) Withdraw(referenceID string, amountBRL float64, pixKey string, pixKeyType string) error {
-	// Not implemented for C6 in this migration; return nil to avoid breaking flows if not used
 	return nil
 }
 
-func (g *c6Gateway) Refund(externalID, reason string) error {
-	// Not implemented for C6 in this migration
-	return nil
+func (g *c6Gateway) consultPix(e2eID string) (c6PixConsultado, error) {
+	var pix c6PixConsultado
+	body, _, err := g.doC6Request(http.MethodGet, "/pix/"+url.PathEscape(e2eID), nil)
+	if err != nil {
+		return pix, err
+	}
+	if err := json.Unmarshal(body, &pix); err != nil {
+		return pix, fmt.Errorf("c6bank parse pix: %w", err)
+	}
+	return pix, nil
+}
+
+func (g *c6Gateway) Refund(e2eID, reason string) error {
+	if strings.TrimSpace(e2eID) == "" {
+		return fmt.Errorf("c6bank refund: e2eid vazio")
+	}
+	pix, err := g.consultPix(e2eID)
+	if err != nil {
+		return err
+	}
+	valor := strings.TrimSpace(pix.Valor)
+	if valor == "" {
+		return fmt.Errorf("c6bank refund: pix %s sem valor", e2eID)
+	}
+	idBytes := make([]byte, 16)
+	if _, err := rand.Read(idBytes); err != nil {
+		return fmt.Errorf("c6bank refund: gerar id: %w", err)
+	}
+	if len(reason) > 140 {
+		reason = reason[:140]
+	}
+	payload := map[string]string{
+		"valor":    valor,
+		"natureza": "ORIGINAL",
+		"descricao": reason,
+	}
+	_, _, err = g.doC6Request(
+		http.MethodPut,
+		fmt.Sprintf("/pix/%s/devolucao/%s", url.PathEscape(e2eID), hex.EncodeToString(idBytes)),
+		payload,
+	)
+	return err
+}
+
+func (g *c6Gateway) RefundByTxid(txid, reason string) error {
+	if strings.TrimSpace(txid) == "" {
+		return fmt.Errorf("c6bank refund: txid vazio")
+	}
+	query := url.Values{}
+	query.Set("inicio", time.Now().Add(-365*24*time.Hour).UTC().Format(time.RFC3339))
+	query.Set("fim", time.Now().Add(24*time.Hour).UTC().Format(time.RFC3339))
+	query.Set("txid", txid)
+	query.Set("paginacao.paginaAtual", "0")
+	query.Set("paginacao.itensPorPagina", "100")
+
+	body, _, err := g.doC6Request(http.MethodGet, "/pix?"+query.Encode(), nil)
+	if err != nil {
+		return err
+	}
+	var lista c6PixLista
+	if err := json.Unmarshal(body, &lista); err != nil {
+		return fmt.Errorf("c6bank parse pix list: %w", err)
+	}
+	if len(lista.Pix) == 0 {
+		return fmt.Errorf("c6bank refund: pix não encontrado para txid %s", txid)
+	}
+	return g.Refund(lista.Pix[0].EndToEndID, reason)
 }

@@ -34,6 +34,10 @@ func Register(r *gin.Engine) {
 		authed.POST("/payouts/:id/pay", controllers.PayPayout)
 		authed.POST("/payouts/:id/reject", controllers.RejectPayout)
 
+		authed.GET("/market-withdraws", controllers.ListMarketWithdraws)
+		authed.POST("/market-withdraws/:id/pay", controllers.PayMarketWithdraw)
+		authed.POST("/market-withdraws/:id/reject", controllers.RejectMarketWithdraw)
+
 		authed.GET("/c6/webhook", controllers.GetC6Webhook)
 		authed.PUT("/c6/webhook", controllers.SetC6Webhook)
 		authed.DELETE("/c6/webhook", controllers.DeleteC6Webhook)

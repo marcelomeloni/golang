@@ -10,10 +10,8 @@ type Gateway interface {
 	GeneratePix(orderID string, amountBRL float64, buyerName, buyerEmail, buyerCPF, buyerPhone string) (Result, error)
 	CheckStatus(externalID string) (string, error)
 	Withdraw(referenceID string, amountBRL float64, pixKey string, pixKeyType string) error
-	// Refund estorna integralmente uma cobrança já paga.
-	// A AbacatePay só aceita reembolso total (nunca parcial).
-	// Um segundo estorno da mesma cobrança não é erro — é idempotente.
-	Refund(externalID, reason string) error
+	// Refund estorna integralmente um Pix recebido, identificado pelo e2eid.
+	Refund(e2eID, reason string) error
 }
 
 // Default é o gateway ativo. Inicialize em main.go com C6 Bank.

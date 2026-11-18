@@ -174,6 +174,10 @@ func (g *c6Gateway) ListWebhooks(params WebhookListParams) (WebhookList, error) 
 }
 
 func (g *c6Gateway) doWebhookRequest(method, path string, payload interface{}) ([]byte, int, error) {
+	return g.doC6Request(method, path, payload)
+}
+
+func (g *c6Gateway) doC6Request(method, path string, payload interface{}) ([]byte, int, error) {
 	token, err := g.getToken()
 	if err != nil {
 		return nil, 0, err

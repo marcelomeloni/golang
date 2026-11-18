@@ -8,7 +8,7 @@ import (
 	"bilheteria-api/services/emailsender"
 	"bilheteria-api/services/orderservice"
 	"bilheteria-api/services/orgservice"
-	"bilheteria-api/services/paymentservice"
+	"bilheteria-api/services/refundservice"
 	"github.com/gin-gonic/gin"
 	"github.com/lib/pq"
 )
@@ -502,15 +502,7 @@ func PatchRefundHandler(c *gin.Context) {
 		// o organizador resolve o estorno fora da Reppy, então apenas confirmamos
 		// o cancelamento no banco.
 		if pixExternalID != "" {
-			if paymentservice.Default == nil {
-				log.Printf("PatchRefundHandler: gateway não inicializado para orderID=%s — estorno não executado", orderID)
-				c.JSON(http.StatusBadGateway, gin.H{
-					"error": "gateway de pagamento indisponível — tente novamente",
-					"code":  "refund_failed",
-				})
-				return
-			}
-			if err := paymentservice.Default.Refund(pixExternalID, "Reembolso aprovado pelo organizador"); err != nil {
+			if err := refundservice.RefundOrder(db, orderID, "Reembolso aprovado pelo organizador"); err != nil {
 				log.Printf("PatchRefundHandler: refund orderID=%s: %v", orderID, err)
 				c.JSON(http.StatusBadGateway, gin.H{
 					"error": "não foi possível estornar o pagamento no momento — tente novamente",
