@@ -114,7 +114,7 @@ func GetEventManageHandler(c *gin.Context) {
 		SELECT COUNT(*)
 		  FROM tickets t
 		  JOIN orders o ON o.id = t.order_id
-		 WHERE o.event_id = $1 AND o.status = 'paid'`, eventID,
+		 WHERE o.event_id = $1 AND o.status = 'paid' AND t.status <> 'cancelled'`, eventID,
 	).Scan(&ticketsSold)
 
 	// ── Capacidade total ──────────────────────────────────────────────────────

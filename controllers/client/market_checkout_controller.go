@@ -12,7 +12,7 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-const marketPlatformFee = 1.6
+const marketPlatformFee = 0.0
 
 func CreateMarketOrder(c *gin.Context) {
 	var req CreateMarketOrderRequest

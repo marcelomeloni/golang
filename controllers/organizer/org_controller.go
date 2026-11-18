@@ -173,7 +173,7 @@ func GetOrgHandler(c *gin.Context) {
 		`SELECT id, name, slug, description, email, phone, instagram,
 		        facebook, website, logo_url, banner_url,
 		        COALESCE(platform_fee_percentage, 8.00) AS platform_fee_percentage,
-		        COALESCE(platform_fee_fixed, 0.80) AS platform_fee_fixed,
+		        COALESCE(platform_fee_fixed, 0) AS platform_fee_fixed,
 		        to_char(created_at, 'YYYY-MM-DD') AS created_at
 		   FROM organizations WHERE id = $1`, orgID,
 	).Scan(

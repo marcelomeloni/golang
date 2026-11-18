@@ -340,9 +340,9 @@ func CancelEventHandler(c *gin.Context) {
 		`SELECT e.status, COUNT(t.id)
            FROM events e
            LEFT JOIN orders o  ON o.event_id = e.id AND o.status = 'paid'
-           LEFT JOIN tickets t ON t.order_id = o.id
+           LEFT JOIN tickets t ON t.order_id = o.id AND t.status <> 'cancelled'
           WHERE e.id = $1 AND e.organization_id = $2
-          GROUP BY e.status`,
+           GROUP BY e.status`,
 		eventID, orgID,
 	).Scan(&status, &ticketsSold)
 	if err != nil {
@@ -367,25 +367,39 @@ func CancelEventHandler(c *gin.Context) {
 		}
 	}
 
-	tx, err := db.Begin()
+	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
+		log.Printf("CancelEventHandler: iniciar transação %s: %v", eventID, err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao cancelar evento"})
 		return
 	}
 	defer tx.Rollback()
 
-	if _, err := tx.ExecContext(ctx,
-		`UPDATE events SET status = 'cancelled', updated_at = now() WHERE id = $1`, eventID,
-	); err != nil {
+	result, err := tx.ExecContext(ctx,
+		`UPDATE events SET status = 'cancelled', updated_at = now() WHERE id = $1 AND organization_id = $2`, eventID, orgID,
+	)
+	if err != nil {
+		log.Printf("CancelEventHandler: atualizar evento %s: %v", eventID, err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao cancelar evento"})
+		return
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		log.Printf("CancelEventHandler: linhas afetadas %s: %v", eventID, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao cancelar evento"})
+		return
+	}
+	if affected == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "evento não encontrado"})
 		return
 	}
 
 	// Fecha os lotes de venda e retira os anúncios do Reppy Market do ar.
 	if _, err := tx.ExecContext(ctx,
-		`UPDATE ticket_batches SET status = 'inactive', updated_at = now() WHERE event_id = $1 AND status = 'active'`,
+		`UPDATE ticket_batches SET status = 'finished' WHERE event_id = $1 AND status = 'active'`,
 		eventID,
 	); err != nil {
+		log.Printf("CancelEventHandler: encerrar lotes %s: %v", eventID, err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao encerrar lotes"})
 		return
 	}
@@ -393,6 +407,7 @@ func CancelEventHandler(c *gin.Context) {
 		`UPDATE market_listings SET status = 'canceled', updated_at = now() WHERE event_id = $1 AND status = 'active'`,
 		eventID,
 	); err != nil {
+		log.Printf("CancelEventHandler: encerrar anúncios %s: %v", eventID, err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao encerrar anúncios"})
 		return
 	}
